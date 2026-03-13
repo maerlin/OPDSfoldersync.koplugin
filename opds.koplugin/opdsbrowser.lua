@@ -650,6 +650,27 @@ function OPDSBrowser:parseFeed(item_url)
     end
 end
 
+-- Decodes RFC 2047 MIME encoded-words that some servers wrap filenames in.
+-- e.g. =?UTF-8?Q?My=5FBook.epub?= -> "My_Book.epub"
+--      =?UTF-8?B?TXkgQm9vay5lcHVi?= -> "My Book.epub"
+local function decodeMIMEEncodedWords(str)
+    if not str or not str:find("=%?") then return str end
+    return (str:gsub("=%?([^?]+)%?([BbQq])%?([^?]*)%?=", function(_, encoding, text)
+        if encoding:upper() == "Q" then
+            text = text:gsub("_", " ")
+            text = text:gsub("=(%x%x)", function(hex)
+                return string.char(tonumber(hex, 16))
+            end)
+        elseif encoding:upper() == "B" then
+            local ok, mime = pcall(require, "mime")
+            if ok and mime.unb64 then
+                text = mime.unb64(text) or text
+            end
+        end
+        return text
+    end))
+end
+
 function OPDSBrowser:getServerFileName(item_url, filetype)
     local headers = self:fetchFeed(item_url, true)
     local filename
@@ -658,11 +679,21 @@ function OPDSBrowser:getServerFileName(item_url, filetype)
         logger.dbg("OPDSBrowser: server file headers", socketutil.redact_headers(headers))
         local disposition = headers["content-disposition"]
         if disposition then
-            -- Try to get filename inside quotes (can contain spaces)
-            filename = disposition:match('filename="([^"]+)"')
+            -- RFC 5987 filename* (preferred per RFC 6266, handles non-ASCII properly)
+            local encoded = disposition:match("[Ff]ilename%*=[Uu][Tt][Ff]%-8''([^;%s]+)")
+            if encoded then
+                filename = url.unescape(encoded)
+            end
             if not filename then
-                -- Fallback: try filename without quotes, until end or semicolon
-                filename = disposition:match('filename=([^;]+)')
+                -- Try to get filename inside quotes (can contain spaces)
+                filename = disposition:match('filename="([^"]+)"')
+                if not filename then
+                    -- Fallback: try filename without quotes, until end or semicolon
+                    filename = disposition:match('filename=([^;]+)')
+                end
+                if filename then
+                    filename = decodeMIMEEncodedWords(filename)
+                end
             end
         end
 
@@ -1282,6 +1313,7 @@ function OPDSBrowser:checkDownloadFile(local_path, remote_url, username, passwor
 end
 
 function OPDSBrowser:downloadFile(local_path, remote_url, username, password, caller_callback)
+    local temp_path = local_path .. ".download"
     logger.dbg("Downloading file", local_path, "from", remote_url)
     local code, headers, status
     local parsed = url.parse(remote_url)
@@ -1292,7 +1324,7 @@ function OPDSBrowser:downloadFile(local_path, remote_url, username, password, ca
             headers  = {
                 ["Accept-Encoding"] = "identity",
             },
-            sink     = ltn12.sink.file(io.open(local_path, "w")),
+            sink     = ltn12.sink.file(io.open(temp_path, "w")),
             user     = username,
             password = password,
         })
@@ -1303,19 +1335,20 @@ function OPDSBrowser:downloadFile(local_path, remote_url, username, password, ca
         })
     end
     if code == 200 then
+        os.rename(temp_path, local_path)
         logger.dbg("File downloaded to", local_path)
         if caller_callback then
             caller_callback(local_path)
         end
         return true
     elseif code == 302 and remote_url:match("^https") and headers.location:match("^http[^s]") then
-        util.removeFile(local_path)
+        util.removeFile(temp_path)
         UIManager:show(InfoMessage:new{
             text = T(_("Insecure HTTPS → HTTP downgrade attempted by redirect from:\n\n'%1'\n\nto\n\n'%2'.\n\nPlease inform the server administrator that many clients disallow this because it could be a downgrade attack."), BD.url(remote_url), BD.url(headers.location)),
             icon = "notice-warning",
         })
     else
-        util.removeFile(local_path)
+        util.removeFile(temp_path)
         logger.dbg("OPDSBrowser:downloadFile: Request failed:", status or code)
         logger.dbg("OPDSBrowser:downloadFile: Response headers:", headers)
         UIManager:show(InfoMessage:new {
@@ -1835,6 +1868,12 @@ function OPDSBrowser:fillPendingSyncs(server)
     self.sync_server_list       = self.sync_server_list or {}
     self.sync_max_dl            = self.settings.sync_max_dl or 50
 
+    -- Build a set of URLs already pending to avoid duplicates
+    local pending_urls = {}
+    for _, item in ipairs(self.pending_syncs) do
+        pending_urls[item.url] = true
+    end
+
     local file_list
     local file_str = self.settings.filetypes
     local new_last_download = nil
@@ -1868,17 +1907,20 @@ function OPDSBrowser:fillPendingSyncs(server)
                 local filetype = self.getFiletype(link)
                 if filetype then
                     if not file_str or file_list and file_list[filetype] then
-                        local filename = self:getFileName(entry)
-                        local download_path = self:getLocalDownloadPath(server, filename, filetype, link.href)
-                        if dl_count <= self.sync_max_dl then -- Append only max_dl entries... may still have sync backlog
-                            table.insert(self.pending_syncs, {
-                                file = download_path,
-                                url = link.href,
-                                username = self.root_catalog_username,
-                                password = self.root_catalog_password,
-                                catalog = server.url,
-                            })
-                            dl_count = dl_count + 1
+                        if not pending_urls[link.href] then
+                            local filename = self:getFileName(entry)
+                            local download_path = self:getLocalDownloadPath(server, filename, filetype, link.href)
+                            if dl_count <= self.sync_max_dl then
+                                table.insert(self.pending_syncs, {
+                                    file = download_path,
+                                    url = link.href,
+                                    username = self.root_catalog_username,
+                                    password = self.root_catalog_password,
+                                    catalog = server.url,
+                                })
+                                pending_urls[link.href] = true
+                                dl_count = dl_count + 1
+                            end
                         end
                         break
                     end
@@ -1992,21 +2034,23 @@ function OPDSBrowser:downloadPendingSyncs(auto_sync)
         local dl_size = #dl_list
         for i = dl_size, 1, -1 do
             local item = dl_list[i]
+            local temp_path = item.file .. ".download"
             if downloaded and downloaded[item.file] then
                 dl_count = dl_count + 1
                 table.remove(dl_list, i)
-            else -- if subprocess has been interrupted, check for the downloaded file
+            else
+                -- Final file exists: completed before interruption, or pre-existing (duplicate)
                 local attr = lfs.attributes(item.file)
                 if attr then
-                    if attr.size > 0 then
-                        table.remove(dl_list, i)
-                        if attr.modification > os.time() - 300 then -- Only count files touched in the last 5 mins
-                            dl_count = dl_count + 1
-                        end
-                    else -- incomplete download
-                        os.remove(item.file)
+                    table.remove(dl_list, i)
+                    if attr.modification > os.time() - 300 then
+                        dl_count = dl_count + 1
                     end
                 end
+            end
+            -- Always clean up partial downloads left by killed subprocess
+            if lfs.attributes(temp_path) then
+                os.remove(temp_path)
             end
         end
         if dl_count > 0 then
