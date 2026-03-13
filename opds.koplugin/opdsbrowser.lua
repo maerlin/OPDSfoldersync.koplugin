@@ -168,82 +168,29 @@ function OPDSBrowser:showOPDSMenu()
     }
     UIManager:show(dialog)
 end
-function OPDSBrowser:setExcludedAuthors()
-    -- Find current server
-    local current_server = nil
+
+function OPDSBrowser:findCurrentServer()
     for _, server in ipairs(self.servers) do
         if server.title == self.root_catalog_title then
-            current_server = server
-            break
+            return server
         end
     end
-
-    if not current_server then
-        UIManager:show(InfoMessage:new{text = _("No catalog selected")})
-        return
-    end
-
-    local current_excluded = table.concat(current_server.excluded_authors or {}, ", ")
-    local dialog
-    dialog = InputDialog:new{
-        title = _("Excluded Authors"),
-        description = _("Comma-separated list of authors to exclude"),
-        input_hint = _("Author One, Author Two"),
-        input = current_excluded,
-        buttons = {
-            {
-                {
-                    text = _("Cancel"),
-                    id = "close",
-                    callback = function()
-                        UIManager:close(dialog)
-                    end,
-                },
-                {
-                    text = _("Save"),
-                    is_enter_default = true,
-                    callback = function()
-                        local input_text = dialog:getInputText()
-                        current_server.excluded_authors = {}
-                        for author in util.gsplit(input_text, ",") do
-                            table.insert(current_server.excluded_authors, util.trim(author))
-                        end
-                        self._manager.updated = true
-                        UIManager:close(dialog)
-                        if self.paths and #self.paths > 0 and self.paths[#self.paths] then
-                            self:updateCatalog(self.paths[#self.paths].url, true)
-                        end
-                    end,
-                },
-            },
-        },
-    }
-    UIManager:show(dialog)
-    dialog:onShowKeyboard()
 end
 
-function OPDSBrowser:setExcludedCategories()
-    -- Find current server
-    local current_server = nil
-    for _, server in ipairs(self.servers) do
-        if server.title == self.root_catalog_title then
-            current_server = server
-            break
-        end
-    end
-
+function OPDSBrowser:editFilterList(field_name, title, description, hint)
+    local current_server = self:findCurrentServer()
     if not current_server then
         UIManager:show(InfoMessage:new{text = _("No catalog selected")})
         return
     end
 
-    local current_excluded = table.concat(current_server.excluded_categories or {}, ", ")
+    local current_value = table.concat(current_server[field_name] or {}, ", ")
     local dialog
     dialog = InputDialog:new{
-        title = _("Excluded Categories"),
-        description = _("Comma-separated list of categories to exclude"),
-        input_hint = _("Fiction, Non-Fiction"),
-        input = current_excluded,
+        title = title,
+        description = description,
+        input_hint = hint,
+        input = current_value,
         buttons = {
             {
                 {
@@ -258,117 +205,9 @@ function OPDSBrowser:setExcludedCategories()
                     is_enter_default = true,
                     callback = function()
                         local input_text = dialog:getInputText()
-                        current_server.excluded_categories = {}
-                        for category in util.gsplit(input_text, ",") do
-                            table.insert(current_server.excluded_categories, util.trim(category))
-                        end
-                        self._manager.updated = true
-                        UIManager:close(dialog)
-                        if self.paths and #self.paths > 0 and self.paths[#self.paths] then
-                            self:updateCatalog(self.paths[#self.paths].url, true)
-                        end
-                    end,
-                },
-            },
-        },
-    }
-    UIManager:show(dialog)
-    dialog:onShowKeyboard()
-end
-
-function OPDSBrowser:setIncludedAuthors()
-    -- Find current server
-    local current_server = nil
-    for _, server in ipairs(self.servers) do
-        if server.title == self.root_catalog_title then
-            current_server = server
-            break
-        end
-    end
-
-    if not current_server then
-        UIManager:show(InfoMessage:new{text = _("No catalog selected")})
-        return
-    end
-
-    local current_included = table.concat(current_server.included_authors or {}, ", ")
-    local dialog
-    dialog = InputDialog:new{
-        title = _("Included Authors"),
-        description = _("Comma-separated list of authors to include"),
-        input_hint = _("Author One, Author Two"),
-        input = current_included,
-        buttons = {
-            {
-                {
-                    text = _("Cancel"),
-                    id = "close",
-                    callback = function()
-                        UIManager:close(dialog)
-                    end,
-                },
-                {
-                    text = _("Save"),
-                    is_enter_default = true,
-                    callback = function()
-                        local input_text = dialog:getInputText()
-                        current_server.included_authors = {}
-                        for author in util.gsplit(input_text, ",") do
-                            table.insert(current_server.included_authors, util.trim(author))
-                        end
-                        self._manager.updated = true
-                        UIManager:close(dialog)
-                        if self.paths and #self.paths > 0 and self.paths[#self.paths] then
-                            self:updateCatalog(self.paths[#self.paths].url, true)
-                        end
-                    end,
-                },
-            },
-        },
-    }
-    UIManager:show(dialog)
-    dialog:onShowKeyboard()
-end
-
-function OPDSBrowser:setIncludedCategories()
-    -- Find current server
-    local current_server = nil
-    for _, server in ipairs(self.servers) do
-        if server.title == self.root_catalog_title then
-            current_server = server
-            break
-        end
-    end
-
-    if not current_server then
-        UIManager:show(InfoMessage:new{text = _("No catalog selected")})
-        return
-    end
-
-    local current_included = table.concat(current_server.included_categories or {}, ", ")
-    local dialog
-    dialog = InputDialog:new{
-        title = _("Included Categories"),
-        description = _("Comma-separated list of categories to include"),
-        input_hint = _("Fiction, Non-Fiction"),
-        input = current_included,
-        buttons = {
-            {
-                {
-                    text = _("Cancel"),
-                    id = "close",
-                    callback = function()
-                        UIManager:close(dialog)
-                    end,
-                },
-                {
-                    text = _("Save"),
-                    is_enter_default = true,
-                    callback = function()
-                        local input_text = dialog:getInputText()
-                        current_server.included_categories = {}
-                        for category in util.gsplit(input_text, ",") do
-                            table.insert(current_server.included_categories, util.trim(category))
+                        current_server[field_name] = {}
+                        for entry in util.gsplit(input_text, ",") do
+                            table.insert(current_server[field_name], util.trim(entry))
                         end
                         self._manager.updated = true
                         UIManager:close(dialog)
@@ -402,38 +241,22 @@ function OPDSBrowser:showFacetMenu()
     table.insert(buttons, {}) -- separator
 
     -- Add filter settings
-    table.insert(buttons, {{
-        text = "\u{f0b0} " .. _("Set excluded authors"),
-        callback = function()
-            UIManager:close(dialog)
-            self:setExcludedAuthors()
-        end,
-        align = "left",
-    }})
-    table.insert(buttons, {{
-        text = "\u{f0b0} " .. _("Set excluded categories"),
-        callback = function()
-            UIManager:close(dialog)
-            self:setExcludedCategories()
-        end,
-        align = "left",
-    }})
-    table.insert(buttons, {{
-        text = "\u{f0b0} " .. _("Set included authors"),
-        callback = function()
-            UIManager:close(dialog)
-            self:setIncludedAuthors()
-        end,
-        align = "left",
-    }})
-    table.insert(buttons, {{
-        text = "\u{f0b0} " .. _("Set included categories"),
-        callback = function()
-            UIManager:close(dialog)
-            self:setIncludedCategories()
-        end,
-        align = "left",
-    }})
+    local filter_defs = {
+        { field = "excluded_authors",    title = _("Excluded Authors"),    desc = _("Comma-separated list of authors to exclude"),    hint = _("Author One, Author Two") },
+        { field = "excluded_categories", title = _("Excluded Categories"), desc = _("Comma-separated list of categories to exclude"), hint = _("Fiction, Non-Fiction") },
+        { field = "included_authors",    title = _("Included Authors"),    desc = _("Comma-separated list of authors to include"),    hint = _("Author One, Author Two") },
+        { field = "included_categories", title = _("Included Categories"), desc = _("Comma-separated list of categories to include"), hint = _("Fiction, Non-Fiction") },
+    }
+    for _, def in ipairs(filter_defs) do
+        table.insert(buttons, {{
+            text = "\u{f0b0} " .. def.title,
+            callback = function()
+                UIManager:close(dialog)
+                self:editFilterList(def.field, def.title, def.desc, def.hint)
+            end,
+            align = "left",
+        }})
+    end
     table.insert(buttons, {}) -- separator
 
     -- Add search option if available
@@ -502,10 +325,10 @@ local function buildRootEntry(server)
         url        = server.url,
         username   = server.username,
         password   = server.password,
-        raw_names  = server.raw_names, -- use server raw filenames for download
+        raw_names  = server.raw_names,
         searchable = server.url and server.url:match("%%s") and true or false,
         sync       = server.sync,
-        sync_dir   = server.sync_dir,  -- Add this line
+        sync_dir   = server.sync_dir,
         excluded_authors = server.excluded_authors,
         excluded_categories = server.excluded_categories,
         included_authors = server.included_authors,
@@ -599,7 +422,6 @@ function OPDSBrowser:addEditCatalog(item)
         },
     }
 
-    -- Existing check buttons...
     check_button_raw_names = CheckButton:new{
         text = _("Use server filenames"),
         checked = item and item.raw_names,
@@ -665,7 +487,10 @@ function OPDSBrowser:addSubCatalog(item_url)
                         if name ~= "" then
                             UIManager:close(dialog)
                             local fields = {name, item_url,
-                                self.root_catalog_username, self.root_catalog_password, self.root_catalog_raw_names}
+                                self.root_catalog_username, self.root_catalog_password,
+                                nil, nil, nil, nil, -- filter fields (5-8)
+                                self.root_catalog_raw_names, -- raw_names (9)
+                            }
                             self:editCatalogFromInput(fields, nil, true) -- no init, stay in the subcatalog
                         end
                     end,
@@ -1414,17 +1239,14 @@ function OPDSBrowser.getFiletype(link)
 end
 
 -- Returns user selected or last opened folder
-function OPDSBrowser:getCurrentDownloadDir(item)
-    -- Check if we have a per-catalog sync directory
-    if item and item.sync_dir then
-        return item.sync_dir
-    end
-    -- Fall back to global sync directory
-    if self.settings.sync_dir then
+function OPDSBrowser:getCurrentDownloadDir(server)
+    if self.sync then
+        if server and server.sync_dir then
+            return server.sync_dir
+        end
         return self.settings.sync_dir
     end
-    -- Default download directory
-    return self.download_dir
+    return G_reader_settings:readSetting("download_dir") or G_reader_settings:readSetting("lastdir")
 end
 
 function OPDSBrowser:getLocalDownloadPath(server, filename, filetype, remote_url)
@@ -1851,8 +1673,8 @@ end
 function OPDSBrowser:setMaxSyncDownload()
     local current_max_dl = self.settings.sync_max_dl or 50
     local spin = SpinWidget:new{
-        title_text = "Set maximum sync size",
-        info_text = "Set the max number of books to download at a time",
+        title_text = _("Set maximum sync size"),
+        info_text = _("Set the max number of books to download at a time"),
         value = current_max_dl,
         value_min = 0,
         value_max = 1000,
@@ -1860,7 +1682,7 @@ function OPDSBrowser:setMaxSyncDownload()
         value_hold_step = 50,
         default_value = 50,
         wrap = true,
-        ok_text = "Save",
+        ok_text = _("Save"),
         callback = function(spin)
             self.settings.sync_max_dl = spin.value
             self._manager.updated = true
@@ -1937,66 +1759,69 @@ function OPDSBrowser:updateFieldInCatalog(item, name, value)
     self._manager.updated = true
 end
 
-function OPDSBrowser:checkSyncDownload(idx, auto_sync)
-    logger.info("OPDS: checkSyncDownload called, sync_dir =", self.settings.sync_dir)
-    if self.settings.sync_dir then
-        logger.info("OPDS: Starting sync process")
-        self.sync = true
-        local info
+function OPDSBrowser:checkSyncDownload(idx, auto_sync, completion_callback)
+    logger.dbg("OPDS: checkSyncDownload called, sync_dir =", self.settings.sync_dir)
+    if not self.settings.sync_dir then
+        logger.dbg("OPDS: No sync directory configured")
         if not auto_sync then
-            info = InfoMessage:new{
-                text = _("Synchronizing lists…"),
-            }
-            UIManager:show(info)
-            UIManager:forceRePaint()
+            UIManager:show(InfoMessage:new{
+                text = _("Please choose a folder for sync downloads first"),
+            })
         end
-        if idx then
-            self:fillPendingSyncs(self.servers[idx-1]) -- First item is "Downloads"
-        else
-            for _, item in ipairs(self.servers) do
-                if item.sync then
-                    self:fillPendingSyncs(item)
-                end
-            end
-        end
-        if not auto_sync and info then
-            UIManager:close(info)
-        end
+        if completion_callback then completion_callback() end
+        return
+    end
 
-        if #self.pending_syncs > 0 then
-            logger.info("OPDS: Found", #self.pending_syncs, "items to download")
-            Trapper:wrap(function()
-                local success, err = pcall(function()
-                    self:downloadPendingSyncs(auto_sync)
-                end)
-                if not success then
-                    logger.err("OPDS: Download failed:", err)
-                end
-                -- Always update last sync time
-                self.settings.last_sync_time = os.time()
-                self._manager.updated = true
-                self._manager:saveSettings()
-                logger.info("OPDS: Sync completed with downloads")
-            end)
-        else
-            -- Only show "Up to date!" for manual sync
-            if not auto_sync then
-                UIManager:show(InfoMessage:new{
-                    text = _("Up to date!"),
-                })
+    logger.dbg("OPDS: Starting sync process")
+    self.sync = true
+    local info
+    if not auto_sync then
+        info = InfoMessage:new{
+            text = _("Synchronizing lists…"),
+        }
+        UIManager:show(info)
+        UIManager:forceRePaint()
+    end
+    if idx then
+        self:fillPendingSyncs(self.servers[idx-1]) -- First item is "Downloads"
+    else
+        for _, item in ipairs(self.servers) do
+            if item.sync then
+                self:fillPendingSyncs(item)
             end
-            logger.info("OPDS: Sync complete - up to date")
-            -- Update last sync time even if nothing new
+        end
+    end
+    if not auto_sync and info then
+        UIManager:close(info)
+    end
+
+    if #self.pending_syncs > 0 then
+        logger.dbg("OPDS: Found", #self.pending_syncs, "items to download")
+        Trapper:wrap(function()
+            local success, err = pcall(function()
+                self:downloadPendingSyncs(auto_sync)
+            end)
+            if not success then
+                logger.err("OPDS: Download failed:", err)
+            end
             self.settings.last_sync_time = os.time()
             self._manager.updated = true
-        end
-        self.sync = false
-        logger.info("OPDS: Sync flag reset")
+            self._manager:saveSettings()
+            self.sync = false
+            logger.dbg("OPDS: Sync completed with downloads")
+            if completion_callback then completion_callback() end
+        end)
     else
-        logger.info("OPDS: No sync directory configured")
-        UIManager:show(InfoMessage:new{
-            text = _("Please choose a folder for sync downloads first"),
-        })
+        if not auto_sync then
+            UIManager:show(InfoMessage:new{
+                text = _("Up to date!"),
+            })
+        end
+        self.settings.last_sync_time = os.time()
+        self._manager.updated = true
+        self.sync = false
+        logger.dbg("OPDS: Sync complete - up to date")
+        if completion_callback then completion_callback() end
     end
 end
 
@@ -2184,13 +2009,11 @@ function OPDSBrowser:downloadPendingSyncs(auto_sync)
                 end
             end
         end
-        local duplicate_count = duplicate_list and #duplicate_list or 0
-        dl_count = dl_count - duplicate_count
         if dl_count > 0 then
             UIManager:show(Notification:new{
                 text = T(N_("1 book downloaded", "%1 books downloaded", dl_count), dl_count)
             })
-            logger.info("OPDS: Download completed -", dl_count, "books")
+            logger.dbg("OPDS: Download completed -", dl_count, "books")
         end
         self._manager.updated = true
         return duplicate_list
@@ -2200,7 +2023,7 @@ function OPDSBrowser:downloadPendingSyncs(auto_sync)
 
     if duplicate_list and #duplicate_list > 0 then
         if auto_sync then
-            logger.info("OPDS: Auto-sync - skipping", #duplicate_list, "duplicate files")
+            logger.dbg("OPDS: Auto-sync - skipping", #duplicate_list, "duplicate files")
         else
             local textviewer
             local duplicate_files = { _("These files are already on the device:") }
@@ -2259,6 +2082,6 @@ function OPDSBrowser:downloadPendingSyncs(auto_sync)
             UIManager:show(textviewer)
         end
     end
-    logger.info("OPDS: downloadPendingSyncs fully completed")
+    logger.dbg("OPDS: downloadPendingSyncs fully completed")
 end
 return OPDSBrowser

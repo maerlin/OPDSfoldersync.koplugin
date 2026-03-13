@@ -17,7 +17,6 @@ local OPDS = WidgetContainer:extend{
     settings = nil,
     servers = nil,
     downloads = nil,
-    -- Add auto-sync task reference
     periodic_sync_task = nil,
     default_servers = {
         {
@@ -45,17 +44,15 @@ local OPDS = WidgetContainer:extend{
             url = "https://gallica.bnf.fr/opds",
         },
     },
-    -- Add default settings with auto-sync enabled
     default_settings = {
         sync_dir = nil,
         sync_max_dl = 50,
         filetypes = nil,
-        -- Auto-sync settings with defaults
-        auto_sync = true,           -- Enabled by default
-        sync_interval_hours = 24,   -- Sync every 24 hours
-        sync_on_network = true,     -- Sync when network connects
-        sync_on_resume = true,      -- Sync when resuming from sleep
-        last_sync_time = 0,         -- Track last sync time
+        auto_sync = true,
+        sync_interval_hours = 24,
+        sync_on_network = true,
+        sync_on_resume = true,
+        last_sync_time = 0,
     },
 }
 
@@ -66,9 +63,7 @@ function OPDS:init()
     end
     self.servers = self.opds_settings:readSetting("servers", self.default_servers)
     self.downloads = self.opds_settings:readSetting("downloads", {})
-    -- Initialize settings with defaults
     self.settings = self.opds_settings:readSetting("settings", self.default_settings)
-    -- Ensure all default settings are present
     for k, v in pairs(self.default_settings) do
         if self.settings[k] == nil then
             self.settings[k] = v
@@ -78,9 +73,7 @@ function OPDS:init()
     self.pending_syncs = self.opds_settings:readSetting("pending_syncs", {})
     self.sync_in_progress = false
 
-    -- Initialize auto-sync
     self:initAutoSync()
-
     self:onDispatcherRegisterActions()
     self.ui.menu:registerToMainMenu(self)
 end
@@ -154,9 +147,9 @@ end
 function OPDS:initAutoSync()
     -- Create periodic sync task
     self.periodic_sync_task = function()
-        logger.info("OPDS: Running periodic sync check")
+        logger.dbg("OPDS: Running periodic sync check")
         self:performAutoSync()
-        self:schedulePeriodicSync() 
+        self:schedulePeriodicSync()
     end
 
     -- Schedule initial sync
@@ -177,7 +170,7 @@ function OPDS:registerAutoSyncEvents()
 end
 
 function OPDS:_onNetworkConnected()
-    logger.info("OPDS: Network connected, checking auto-sync")
+    logger.dbg("OPDS: Network connected, checking auto-sync")
     if self.settings.sync_on_network then
         UIManager:scheduleIn(0.5, function()
             self:performAutoSync()
@@ -186,7 +179,7 @@ function OPDS:_onNetworkConnected()
 end
 
 function OPDS:_onResume()
-    logger.info("OPDS: Resumed, checking auto-sync")
+    logger.dbg("OPDS: Resumed, checking auto-sync")
     if self.settings.sync_on_resume then
         UIManager:scheduleIn(2, function()
             self:performAutoSync()
@@ -198,61 +191,52 @@ function OPDS:schedulePeriodicSync()
     UIManager:unschedule(self.periodic_sync_task)
     local interval_seconds = self.settings.sync_interval_hours * 3600
     UIManager:scheduleIn(interval_seconds, self.periodic_sync_task)
-    logger.info("OPDS: Scheduled periodic sync in", interval_seconds, "seconds")
+    logger.dbg("OPDS: Scheduled periodic sync in", interval_seconds, "seconds")
 end
 
 function OPDS:performAutoSync()
     if self.sync_in_progress then
-        logger.info("OPDS: Sync already in progress, skipping")
+        logger.dbg("OPDS: Sync already in progress, skipping")
         return
     end
-    -- Check if we have a sync directory configured
     if not self.settings.sync_dir then
-        logger.info("OPDS: No sync directory configured, skipping auto-sync")
+        logger.dbg("OPDS: No sync directory configured, skipping auto-sync")
         return
     end
 
-    -- Check if enough time has passed since last sync
     local now = os.time()
     local time_since_last = now - (self.settings.last_sync_time or 0)
     local min_interval = self.settings.sync_interval_hours * 3600
-
     if time_since_last < min_interval then
-        logger.info("OPDS: Last sync too recent, skipping")
+        logger.dbg("OPDS: Last sync too recent, skipping")
         return
     end
 
-    -- Check network connectivity
     local NetworkMgr = require("ui/network/manager")
     if not NetworkMgr:isOnline() then
-        logger.info("OPDS: Not online, skipping auto-sync")
+        logger.dbg("OPDS: Not online, skipping auto-sync")
         return
     end
 
     self.sync_in_progress = true
-    logger.info("OPDS: Starting auto-sync")
+    logger.dbg("OPDS: Starting auto-sync")
 
-    -- Create browser instance if it doesn't exist
-    if not self.opds_browser then
-        self.opds_browser = OPDSBrowser:new{
-            servers = self.servers,
-            downloads = self.downloads,
-            settings = self.settings,
-            pending_syncs = self.pending_syncs,
-            title = _("OPDS catalog"),
-            is_popout = false,
-            is_borderless = true,
-            title_bar_fm_style = true,
-            _manager = self,
-        }
-    end
-
-    if self.opds_browser then
-        self.opds_browser.sync_force = false
-        self.opds_browser:checkSyncDownload(nil, true) -- Pass true for auto_sync
-    end
-
-    self.sync_in_progress = false
+    local auto_browser = OPDSBrowser:new{
+        servers = self.servers,
+        downloads = self.downloads,
+        settings = self.settings,
+        pending_syncs = self.pending_syncs,
+        title = _("OPDS catalog"),
+        is_popout = false,
+        is_borderless = true,
+        title_bar_fm_style = true,
+        _manager = self,
+    }
+    auto_browser.sync_force = false
+    auto_browser:checkSyncDownload(nil, true, function()
+        self.sync_in_progress = false
+        logger.dbg("OPDS: Auto-sync completed")
+    end)
 end
 
 function OPDS:saveSettings()
@@ -264,6 +248,10 @@ function OPDS:saveSettings()
         self.opds_settings:flush()
         self.updated = false
     end
+end
+
+function OPDS:onFlushSettings()
+    self:saveSettings()
 end
 
 function OPDS:onCloseWidget()
