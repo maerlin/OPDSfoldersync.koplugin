@@ -1869,10 +1869,10 @@ function OPDSBrowser:fillPendingSyncs(server)
     self.sync_server_list       = self.sync_server_list or {}
     self.sync_max_dl            = self.settings.sync_max_dl or 50
 
-    -- Build a set of URLs already pending to avoid duplicates
+    -- Build a URL→index map for deduplication and path updates
     local pending_urls = {}
-    for _, item in ipairs(self.pending_syncs) do
-        pending_urls[item.url] = true
+    for i, item in ipairs(self.pending_syncs) do
+        pending_urls[item.url] = i
     end
 
     local file_list
@@ -1908,9 +1908,12 @@ function OPDSBrowser:fillPendingSyncs(server)
                 local filetype = self.getFiletype(link)
                 if filetype then
                     if not file_str or file_list and file_list[filetype] then
-                        if not pending_urls[link.href] then
-                            local filename = self:getFileName(entry)
-                            local download_path = self:getLocalDownloadPath(server, filename, filetype, link.href)
+                        local filename = self:getFileName(entry)
+                        local download_path = self:getLocalDownloadPath(server, filename, filetype, link.href)
+                        if pending_urls[link.href] then
+                            -- Update file path in case sync_dir or filename settings changed
+                            self.pending_syncs[pending_urls[link.href]].file = download_path
+                        else
                             if dl_count <= self.sync_max_dl then
                                 table.insert(self.pending_syncs, {
                                     file = download_path,
@@ -1919,7 +1922,7 @@ function OPDSBrowser:fillPendingSyncs(server)
                                     password = self.root_catalog_password,
                                     catalog = server.url,
                                 })
-                                pending_urls[link.href] = true
+                                pending_urls[link.href] = #self.pending_syncs
                                 dl_count = dl_count + 1
                             end
                         end
