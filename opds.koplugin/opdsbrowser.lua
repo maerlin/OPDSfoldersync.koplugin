@@ -436,6 +436,7 @@ function OPDSBrowser:addEditCatalog(item)
     -- Add sync directory button
     button_sync_dir = Button:new{
         text = item and item.sync_dir and _("Sync folder: ") .. item.sync_dir or _("Set sync folder"),
+        sync_dir = item and item.sync_dir,
         callback = function()
             local force_chooser_dir_for_per_catalog
             if Device:isAndroid() then
