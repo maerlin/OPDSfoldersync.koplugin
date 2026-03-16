@@ -1664,38 +1664,48 @@ end
 
 -- Download whole download list
 function OPDSBrowser:downloadDownloadList()
-    local info = InfoMessage:new{ text = _("Downloading… (tap to cancel)") }
-    UIManager:show(info)
-    UIManager:forceRePaint()
-    local completed, downloaded = Trapper:dismissableRunInSubprocess(function()
-        local dl = {}
-        for _, item in ipairs(self.downloads) do
-            if self:downloadFile(item.file, item.url, item.username, item.password) then
-                dl[item.file] = true
+    local total = #self.downloads
+    local dl_count = 0
+    local downloaded_files = {}
+
+    for idx, item in ipairs(self.downloads) do
+        local info = InfoMessage:new{
+            text = T(_("Downloading %1 of %2…\n(tap to stop)"), idx, total)
+        }
+        UIManager:show(info)
+        UIManager:forceRePaint()
+
+        local completed, success = Trapper:dismissableRunInSubprocess(function()
+            return self:downloadFile(item.file, item.url, item.username, item.password)
+        end, info)
+
+        if completed then
+            UIManager:close(info)
+            if success then
+                dl_count = dl_count + 1
+                downloaded_files[item.file] = true
+            else
+                local temp_path = item.file .. ".download"
+                if lfs.attributes(temp_path) then os.remove(temp_path) end
             end
+        else
+            local temp_path = item.file .. ".download"
+            if lfs.attributes(temp_path) then os.remove(temp_path) end
+
+            local stop = Trapper:confirm(
+                T(_("Downloaded %1 of %2.\nStop downloading?"), dl_count, total),
+                _("Continue"), _("Stop"))
+            if stop then break end
         end
-        return dl
-    end, info)
-    if completed then
-        UIManager:close(info)
     end
-    local dl_count = #self.downloads
-    for i = dl_count, 1, -1 do
-        local item = self.downloads[i]
-        if downloaded and downloaded[item.file] then
+
+    -- Remove successfully downloaded items
+    for i = #self.downloads, 1, -1 do
+        if downloaded_files[self.downloads[i].file] then
             table.remove(self.downloads, i)
-        else -- if subprocess has been interrupted, check for the downloaded file
-            local attr = lfs.attributes(item.file)
-            if attr then
-                if attr.size > 0 then
-                    table.remove(self.downloads, i)
-                else -- incomplete download
-                    os.remove(item.file)
-                end
-            end
         end
     end
-    dl_count = dl_count - #self.downloads
+
     if dl_count > 0 then
         self:updateDownloadListItemTable()
         self.download_list_updated = true
@@ -2007,56 +2017,74 @@ end
 -- Download pending syncs list
 function OPDSBrowser:downloadPendingSyncs(auto_sync)
     local dl_list = self.pending_syncs
-    local function dismissable_download()
-        local info = nil -- Default to nil for auto-sync
-        if not auto_sync then
-            info = InfoMessage:new{ text = _("Downloading… (tap to cancel)") }
-            UIManager:show(info)
-            UIManager:forceRePaint()
-        end
-        local completed, downloaded, duplicate_list = Trapper:dismissableRunInSubprocess(function()
-            local dl = {}
-            local dupe_list = {}
-            for _, item in ipairs(dl_list) do
-                if self.sync_server_list[item.catalog] then
-                    if lfs.attributes(item.file) and not self.sync_force then
-                        table.insert(dupe_list, item)
-                    else
-                        if self:downloadFile(item.file, item.url, item.username, item.password) then
-                            dl[item.file] = true
-                        end
-                    end
-                end
-            end
-            return dl, dupe_list
-        end, info) -- Pass info directly (nil for auto-sync)
 
-        if completed and info then
-            UIManager:close(info)
-        end
-        local dl_count = 0
-        local dl_size = #dl_list
-        for i = dl_size, 1, -1 do
-            local item = dl_list[i]
-            local temp_path = item.file .. ".download"
-            if downloaded and downloaded[item.file] then
-                dl_count = dl_count + 1
-                table.remove(dl_list, i)
-            else
-                -- Final file exists: completed before interruption, or pre-existing (duplicate)
-                local attr = lfs.attributes(item.file)
-                if attr then
-                    table.remove(dl_list, i)
-                    if attr.modification > os.time() - 300 then
-                        dl_count = dl_count + 1
-                    end
+    local function do_downloads()
+        -- Pre-scan: separate duplicates from items to download
+        local items_to_download = {}
+        local duplicate_list = {}
+        for _, item in ipairs(dl_list) do
+            if self.sync_server_list[item.catalog] then
+                if lfs.attributes(item.file) and not self.sync_force then
+                    table.insert(duplicate_list, item)
+                else
+                    table.insert(items_to_download, item)
                 end
             end
-            -- Always clean up partial downloads left by killed subprocess
-            if lfs.attributes(temp_path) then
-                os.remove(temp_path)
+        end
+
+        local total = #items_to_download
+        local dl_count = 0
+        local downloaded_urls = {}
+
+        for idx, item in ipairs(items_to_download) do
+            local info
+            if not auto_sync then
+                info = InfoMessage:new{
+                    text = T(_("Downloading %1 of %2…\n(tap to stop)"), idx, total)
+                }
+                UIManager:show(info)
+                UIManager:forceRePaint()
+            end
+
+            local completed, success = Trapper:dismissableRunInSubprocess(function()
+                return self:downloadFile(item.file, item.url, item.username, item.password)
+            end, info)
+
+            if completed then
+                if info then UIManager:close(info) end
+                if success then
+                    dl_count = dl_count + 1
+                    downloaded_urls[item.url] = true
+                else
+                    local temp_path = item.file .. ".download"
+                    if lfs.attributes(temp_path) then os.remove(temp_path) end
+                end
+            else
+                local temp_path = item.file .. ".download"
+                if lfs.attributes(temp_path) then os.remove(temp_path) end
+
+                if not auto_sync then
+                    local stop = Trapper:confirm(
+                        T(_("Downloaded %1 of %2.\nStop downloading?"), dl_count, total),
+                        _("Continue"), _("Stop"))
+                    if stop then break end
+                else
+                    break
+                end
             end
         end
+
+        -- Remove downloaded and duplicate items from pending_syncs
+        local dupe_urls = {}
+        for _, item in ipairs(duplicate_list) do
+            dupe_urls[item.url] = true
+        end
+        for i = #dl_list, 1, -1 do
+            if downloaded_urls[dl_list[i].url] or dupe_urls[dl_list[i].url] then
+                table.remove(dl_list, i)
+            end
+        end
+
         if dl_count > 0 then
             UIManager:show(Notification:new{
                 text = T(N_("1 book downloaded", "%1 books downloaded", dl_count), dl_count)
@@ -2067,7 +2095,7 @@ function OPDSBrowser:downloadPendingSyncs(auto_sync)
         return duplicate_list
     end
 
-    local duplicate_list = dismissable_download()
+    local duplicate_list = do_downloads()
 
     if duplicate_list and #duplicate_list > 0 then
         if auto_sync then
@@ -2099,7 +2127,7 @@ function OPDSBrowser:downloadPendingSyncs(auto_sync)
                                     table.insert(dl_list, entry)
                                 end
                                 Trapper:wrap(function()
-                                    dismissable_download()
+                                    do_downloads()
                                 end)
                             end
                         },
@@ -2108,19 +2136,17 @@ function OPDSBrowser:downloadPendingSyncs(auto_sync)
                             callback = function()
                                 self.sync_force = true
                                 textviewer:onClose()
-                                local copy_download_dir, original_dir, copies_dir, copy_download_path
-                                copies_dir = "copies"
-                                original_dir = util.splitFilePathName(duplicate_list[1].file)
-                                copy_download_dir = original_dir .. copies_dir .. "/"
+                                local copies_dir = "copies"
+                                local original_dir = util.splitFilePathName(duplicate_list[1].file)
+                                local copy_download_dir = original_dir .. copies_dir .. "/"
                                 util.makePath(copy_download_dir)
                                 for _, entry in ipairs(duplicate_list) do
                                     local _, file_name = util.splitFilePathName(entry.file)
-                                    copy_download_path = copy_download_dir .. file_name
-                                    entry.file = copy_download_path
+                                    entry.file = copy_download_dir .. file_name
                                     table.insert(dl_list, entry)
                                 end
                                 Trapper:wrap(function()
-                                    dismissable_download()
+                                    do_downloads()
                                 end)
                             end
                         },
