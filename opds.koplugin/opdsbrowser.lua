@@ -238,6 +238,64 @@ function OPDSBrowser:showFacetMenu()
         end,
         align = "left",
     }})
+    local server = self.root_catalog_server_idx and self.servers[self.root_catalog_server_idx]
+
+    -- "Load all entries" when there are more pages
+    if self.item_table.hrefs and self.item_table.hrefs.next then
+        table.insert(buttons, {{
+            text = "\u{f03a} " .. _("Load all entries"),
+            callback = function()
+                UIManager:close(dialog)
+                self:loadAllPages()
+            end,
+            align = "left",
+        }})
+    end
+    -- Persistent per-catalog toggles
+    if server then
+        table.insert(buttons, {{
+            text = (server.load_all and "✓ " or "") .. _("Always load all entries"),
+            callback = function()
+                UIManager:close(dialog)
+                server.load_all = not server.load_all or nil
+                self.root_catalog_load_all = server.load_all
+                self._manager.updated = true
+            end,
+            align = "left",
+        }})
+    end
+    -- Sort: one-shot buttons (left) + persistent toggle (right)
+    local sort_order = server and server.sort_order
+    table.insert(buttons, {
+        {
+            text = (sort_order == "asc" and "✓ " or "") .. _("Sort A→Z"),
+            callback = function()
+                UIManager:close(dialog)
+                if server then
+                    local new_order = sort_order == "asc" and nil or "asc"
+                    server.sort_order = new_order
+                    self.root_catalog_sort_order = new_order
+                    self._manager.updated = true
+                end
+                table.sort(self.item_table, function(a, b) return a.text < b.text end)
+                self:switchItemTable(self.catalog_title, self.item_table, -1)
+            end,
+        },
+        {
+            text = (sort_order == "desc" and "✓ " or "") .. _("Sort Z→A"),
+            callback = function()
+                UIManager:close(dialog)
+                if server then
+                    local new_order = sort_order == "desc" and nil or "desc"
+                    server.sort_order = new_order
+                    self.root_catalog_sort_order = new_order
+                    self._manager.updated = true
+                end
+                table.sort(self.item_table, function(a, b) return a.text > b.text end)
+                self:switchItemTable(self.catalog_title, self.item_table, -1)
+            end,
+        },
+    })
     table.insert(buttons, {}) -- separator
 
     -- Add filter settings
@@ -329,6 +387,8 @@ local function buildRootEntry(server)
         searchable = server.url and server.url:match("%%s") and true or false,
         sync       = server.sync,
         sync_dir   = server.sync_dir,
+        sort_order = server.sort_order,
+        load_all   = server.load_all,
         excluded_authors = server.excluded_authors,
         excluded_categories = server.excluded_categories,
         included_authors = server.included_authors,
@@ -505,6 +565,7 @@ end
 
 -- Saves catalog properties from input dialog
 function OPDSBrowser:editCatalogFromInput(fields, item, no_refresh)
+    local old_server = item and self.servers[item.idx - 1]
     local new_server = {
         title     = fields[1],
         url       = fields[2]:match("^%a+://") and fields[2] or "http://" .. fields[2],
@@ -517,6 +578,8 @@ function OPDSBrowser:editCatalogFromInput(fields, item, no_refresh)
         raw_names = fields[9],
         sync      = fields[10],
         sync_dir  = fields[11],
+        sort_order = old_server and old_server.sort_order,
+        load_all   = old_server and old_server.load_all,
     }
 
     -- Parse excluded authors
@@ -1007,22 +1070,21 @@ function OPDSBrowser:updateCatalog(item_url, paths_updated)
         end
         self:switchItemTable(self.catalog_title, menu_table)
 
-        -- Set appropriate title bar icon based on content
-        if self.facet_groups or self.search_url then
-            self:setTitleBarLeftIcon("appbar.menu")
-            self.onLeftButtonTap = function()
-                self:showFacetMenu()
-            end
-        else
-            self:setTitleBarLeftIcon("plus")
-            self.onLeftButtonTap = function()
-                self:addSubCatalog(item_url)
-            end
+        self:setTitleBarLeftIcon("appbar.menu")
+        self.onLeftButtonTap = function()
+            self:showFacetMenu()
         end
 
-        if self.page_num <= 1 then
-            -- Request more content, but don't change the page
-            self:onNextPage(true)
+        if self.root_catalog_load_all and self.item_table.hrefs and self.item_table.hrefs.next then
+            self:loadAllPages()
+        else
+            if self.page_num <= 1 then
+                self:onNextPage(true)
+            end
+            if self.root_catalog_sort_order then
+                self:applySortOrder()
+                self:switchItemTable(self.catalog_title, self.item_table, -1)
+            end
         end
     end
 end
@@ -1037,6 +1099,69 @@ function OPDSBrowser:appendCatalog(item_url)
         self.item_table.hrefs = menu_table.hrefs
         self:switchItemTable(self.catalog_title, self.item_table, -1)
         return true
+    end
+end
+
+-- Fetches all remaining pages of the current catalog so the full list is available
+function OPDSBrowser:loadAllPages()
+    local hrefs = self.item_table.hrefs
+    if not hrefs or not hrefs.next then
+        UIManager:show(InfoMessage:new{
+            text = _("All entries are already loaded."),
+        })
+        return
+    end
+
+    local saved_facets = self.facet_groups
+    local saved_search = self.search_url
+
+    local info = InfoMessage:new{
+        text = T(_("Loading entries: %1 so far…"), #self.item_table),
+    }
+    UIManager:show(info)
+    UIManager:forceRePaint()
+
+    while true do
+        hrefs = self.item_table.hrefs
+        if not hrefs or not hrefs.next then break end
+
+        local menu_table = self:genItemTableFromURL(hrefs.next)
+        if #menu_table == 0 then break end
+
+        for __, item in ipairs(menu_table) do
+            table.insert(self.item_table, item)
+        end
+        self.item_table.hrefs = menu_table.hrefs
+
+        UIManager:close(info)
+        info = InfoMessage:new{
+            text = T(_("Loading entries: %1 so far…"), #self.item_table),
+        }
+        UIManager:show(info)
+        UIManager:forceRePaint()
+    end
+
+    UIManager:close(info)
+
+    self.facet_groups = saved_facets
+    self.search_url = saved_search
+
+    self:applySortOrder()
+    self:switchItemTable(self.catalog_title, self.item_table, -1)
+    UIManager:show(InfoMessage:new{
+        text = T(_("Loaded %1 entries."), #self.item_table),
+        timeout = 2,
+    })
+end
+
+-- Sorts the current item_table according to the configured sort_order
+function OPDSBrowser:applySortOrder()
+    local order = self.root_catalog_sort_order
+    if not order then return end
+    if order == "asc" then
+        table.sort(self.item_table, function(a, b) return a.text < b.text end)
+    elseif order == "desc" then
+        table.sort(self.item_table, function(a, b) return a.text > b.text end)
     end
 end
 
@@ -1373,10 +1498,13 @@ function OPDSBrowser:onMenuSelect(item)
                 end
                 return true
             end
-            self.root_catalog_title     = item.text
-            self.root_catalog_username  = item.username
-            self.root_catalog_password  = item.password
-            self.root_catalog_raw_names = item.raw_names
+            self.root_catalog_title      = item.text
+            self.root_catalog_username   = item.username
+            self.root_catalog_password   = item.password
+            self.root_catalog_raw_names  = item.raw_names
+            self.root_catalog_sort_order = item.sort_order
+            self.root_catalog_load_all   = item.load_all
+            self.root_catalog_server_idx = item.idx - 1
         end
         local connect_callback
         if item.searchable then
