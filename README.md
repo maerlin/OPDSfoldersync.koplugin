@@ -83,6 +83,9 @@ This plugin now supports automated synchronization to keep your library up-to-da
 
 *   When "Sync Catalog" is enabled for a catalog, Koreader will attempt to download new items from that catalog into its designated sync folder.
 *   The plugin prioritizes the per-catalog sync folder. If not set, it falls back to the global `sync_dir` setting (if configured in Koreader settings), and finally to Koreader's default download directory.
+*   **Max sync size:** Controls how many books can be queued per sync cycle (default: 50). If your largest catalog has more books than this limit, increase it via "Set max number of files to sync" in the OPDS menu. This is a per-cycle cap — it doesn't pre-allocate anything and has no cost when the catalog is already up to date.
+*   **Download progress:** During sync and batch downloads, a progress indicator shows "Downloading X of Y" so you always know where you are.
+*   **Safe cancellation:** Tapping the progress message prompts a "Stop downloading?" confirmation. Choosing "Continue" skips the current file and moves to the next; choosing "Stop" ends the session. Interrupted files are cleaned up automatically and retried on the next sync.
 
 ## Configuration
 
