@@ -32,6 +32,85 @@ local _ = require("gettext")
 local N_ = _.ngettext
 local T = ffiUtil.template
 
+-- luacheck: globals G_reader_settings
+
+local function parseCSVList(str)
+    local list = {}
+    if str and str ~= "" then
+        for entry in util.gsplit(str, ",") do
+            local trimmed = util.trim(entry)
+            if trimmed ~= "" then
+                table.insert(list, trimmed)
+            end
+        end
+    end
+    return list
+end
+
+local function listHasEntries(list)
+    return type(list) == "table" and #list > 0
+end
+
+local function listContainsText(list, text)
+    if not listHasEntries(list) then return false end
+    local lower_text = (text or ""):lower()
+    for _, value in ipairs(list) do
+        local needle = (value or ""):lower()
+        if needle ~= "" and lower_text:find(needle, 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
+local function listContainsCategory(list, entry)
+    if not listHasEntries(list) or not entry or not entry.category then return false end
+    local categories = entry.category
+    if type(categories) == "string" then
+        categories = { categories }
+    elseif type(categories) == "table" and (categories.term or categories.label) then
+        categories = { categories }
+    elseif type(categories) ~= "table" then
+        return false
+    end
+    for _, category in ipairs(categories) do
+        local text
+        if type(category) == "table" then
+            text = category.term or category.label
+        elseif type(category) == "string" then
+            text = category
+        end
+        if text and listContainsText(list, text) then
+            return true
+        end
+    end
+    return false
+end
+
+local function redactURLForLog(value)
+    if type(value) ~= "string" then return value end
+    return value
+        :gsub("^(https?://[^/@:]+):([^/@]+)@", "%1:…@")
+        :gsub("([?&][^=]*[Kk]ey=)[^&]+", "%1…")
+        :gsub("([?&][Tt]oken=)[^&]+", "%1…")
+        :gsub("([?&][Pp]assword=)[^&]+", "%1…")
+end
+
+local function redirectDowngradeLocation(from_url, status_code, location)
+    status_code = tonumber(status_code)
+    if not location
+        or not (status_code == 301 or status_code == 302 or status_code == 303
+            or status_code == 307 or status_code == 308)
+        or type(from_url) ~= "string"
+        or not from_url:lower():match("^https://") then
+        return nil
+    end
+    local absolute_location = url.absolute(from_url, location)
+    if absolute_location and absolute_location:lower():match("^http://") then
+        return absolute_location
+    end
+end
+
 -- cache catalog parsed from feed xml
 local CatalogCache = Cache:new{
     -- Make it 20 slots, with no storage space constraints
@@ -79,7 +158,7 @@ end
 function OPDSBrowser:showOPDSMenu()
     local dialog
     local auto_sync_status = self._manager.settings.auto_sync and _("On") or _("Off")
-    local last_sync = self._manager.settings.last_sync_time
+    local last_sync = tonumber(self._manager.settings.last_sync_time) or 0
     local last_sync_text = last_sync > 0 and os.date("%Y-%m-%d %H:%M", last_sync) or _("Never")
     dialog = ButtonDialog:new{
         buttons = {
@@ -205,10 +284,7 @@ function OPDSBrowser:editFilterList(field_name, title, description, hint)
                     is_enter_default = true,
                     callback = function()
                         local input_text = dialog:getInputText()
-                        current_server[field_name] = {}
-                        for entry in util.gsplit(input_text, ",") do
-                            table.insert(current_server[field_name], util.trim(entry))
-                        end
+                        current_server[field_name] = parseCSVList(input_text)
                         self._manager.updated = true
                         UIManager:close(dialog)
                         if self.paths and #self.paths > 0 and self.paths[#self.paths] then
@@ -474,8 +550,9 @@ function OPDSBrowser:addEditCatalog(item)
                         new_fields[9] = check_button_raw_names.checked or nil
                         new_fields[10] = check_button_sync_catalog.checked or nil
                         new_fields[11] = button_sync_dir.sync_dir or nil
-                        self:editCatalogFromInput(new_fields, item)
-                        UIManager:close(dialog)
+                        if self:editCatalogFromInput(new_fields, item) then
+                            UIManager:close(dialog)
+                        end
                     end,
                 },
             },
@@ -503,8 +580,8 @@ function OPDSBrowser:addEditCatalog(item)
                 force_chooser_dir_for_per_catalog = Device.home_dir
             end
 
-            -- Use item.sync_dir or self.settings.sync_dir as initial path
-            local initial_path = item and item.sync_dir or self.settings.sync_dir or G_reader_settings:readSetting("download_dir")
+            -- Use item sync_dir, global sync_dir, or default download dir as initial path.
+            local initial_path = item and item.sync_dir or self.settings.sync_dir or self:getDefaultDownloadDir()
 
             DownloadMgr:new{
                 onConfirm = function(inbox)
@@ -565,50 +642,31 @@ end
 
 -- Saves catalog properties from input dialog
 function OPDSBrowser:editCatalogFromInput(fields, item, no_refresh)
+    local catalog_title = util.trim(fields[1] or "")
+    local catalog_url = util.trim(fields[2] or "")
+    if catalog_title == "" or catalog_url == "" then
+        UIManager:show(InfoMessage:new{
+            text = _("Catalog name and URL are required."),
+        })
+        return false
+    end
+
     local old_server = item and self.servers[item.idx - 1]
     local new_server = {
-        title     = fields[1],
-        url       = fields[2]:match("^%a+://") and fields[2] or "http://" .. fields[2],
-        username  = fields[3] ~= "" and fields[3] or nil,
-        password  = fields[4] ~= "" and fields[4] or nil,
-        excluded_authors = {},
-        excluded_categories = {},
-        included_authors = {},
-        included_categories = {},
+        title     = catalog_title,
+        url       = catalog_url:match("^%a[%w+.-]*://") and catalog_url or "http://" .. catalog_url,
+        username  = fields[3] and fields[3] ~= "" and fields[3] or nil,
+        password  = fields[4] and fields[4] ~= "" and fields[4] or nil,
+        excluded_authors = parseCSVList(fields[5]),
+        excluded_categories = parseCSVList(fields[6]),
+        included_authors = parseCSVList(fields[7]),
+        included_categories = parseCSVList(fields[8]),
         raw_names = fields[9],
         sync      = fields[10],
         sync_dir  = fields[11],
         sort_order = old_server and old_server.sort_order,
         load_all   = old_server and old_server.load_all,
     }
-
-    -- Parse excluded authors
-    if fields[5] and fields[5] ~= "" then
-        for author in util.gsplit(fields[5], ",") do
-            table.insert(new_server.excluded_authors, util.trim(author))
-        end
-    end
-
-    -- Parse excluded categories
-    if fields[6] and fields[6] ~= "" then
-        for category in util.gsplit(fields[6], ",") do
-            table.insert(new_server.excluded_categories, util.trim(category))
-        end
-    end
-
-    -- Parse included authors
-    if fields[7] and fields[7] ~= "" then
-        for author in util.gsplit(fields[7], ",") do
-            table.insert(new_server.included_authors, util.trim(author))
-        end
-    end
-
-    -- Parse included categories
-    if fields[8] and fields[8] ~= "" then
-        for category in util.gsplit(fields[8], ",") do
-            table.insert(new_server.included_categories, util.trim(category))
-        end
-    end
 
     local new_item = buildRootEntry(new_server)
     local new_idx, itemnumber
@@ -625,6 +683,7 @@ function OPDSBrowser:editCatalogFromInput(fields, item, no_refresh)
         self:switchItemTable(nil, self.item_table, itemnumber)
     end
     self._manager.updated = true
+    return true
 end
 
 -- Deletes catalog from the root list
@@ -637,6 +696,18 @@ end
 
 -- Fetches feed from server
 function OPDSBrowser:fetchFeed(item_url, headers_only)
+    local parsed = url.parse(item_url or "")
+    local scheme = parsed and parsed.scheme
+    if scheme ~= "http" and scheme ~= "https" then
+        if not headers_only then
+            UIManager:show(InfoMessage:new {
+                text = T(_("Invalid protocol:\n%1"), scheme or _("unknown")),
+            })
+        end
+        logger.warn("OPDSBrowser:fetchFeed: invalid protocol", scheme)
+        return nil
+    end
+
     local sink = {}
     socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
     local request = {
@@ -652,8 +723,15 @@ function OPDSBrowser:fetchFeed(item_url, headers_only)
         password = self.root_catalog_password,
     }
     logger.dbg("Request:", socketutil.redact_request(request))
-    local code, headers, status = socket.skip(1, http.request(request))
+    local ok, code, headers, status = pcall(function()
+        return socket.skip(1, http.request(request))
+    end)
     socketutil:reset_timeout()
+    if not ok then
+        logger.warn("OPDSBrowser:fetchFeed: request failed", code)
+        status = code
+        code, headers = nil, nil
+    end
 
     if headers_only then
         return headers
@@ -664,14 +742,14 @@ function OPDSBrowser:fetchFeed(item_url, headers_only)
     end
 
     local text, icon
-    if headers and code == 301 then
-        text = T(_("The catalog has been permanently moved. Please update catalog URL to '%1'."), BD.url(headers.location))
-    elseif headers and code == 302
-        and item_url:match("^https")
-        and headers.location:match("^http[^s]") then
+    local location = headers and headers.location
+    local downgrade_location = redirectDowngradeLocation(item_url, code, location)
+    if downgrade_location then
         text = T(_("Insecure HTTPS → HTTP downgrade attempted by redirect from:\n\n'%1'\n\nto\n\n'%2'.\n\nPlease inform the server administrator that many clients disallow this because it could be a downgrade attack."),
-            BD.url(item_url), BD.url(headers.location))
-            icon = "notice-warning"
+            BD.url(item_url), BD.url(downgrade_location))
+        icon = "notice-warning"
+    elseif headers and tonumber(code) == 301 and location then
+        text = T(_("The catalog has been permanently moved. Please update catalog URL to '%1'."), BD.url(location))
     else
         local error_message = {
             ["401"] = _("Authentication required for catalog. Please add a username and password."),
@@ -685,7 +763,7 @@ function OPDSBrowser:fetchFeed(item_url, headers_only)
         text = text,
         icon = icon,
     })
-    logger.dbg(string.format("OPDS: Failed to fetch catalog `%s`: %s", item_url, text))
+    logger.dbg(string.format("OPDS: Failed to fetch catalog `%s`: %s", redactURLForLog(item_url), text))
 end
 
 -- Parses feed to catalog
@@ -736,6 +814,10 @@ local function decodeMIMEEncodedWords(str)
 end
 
 function OPDSBrowser:getServerFileName(item_url, filetype)
+    if type(item_url) ~= "string" or item_url == "" then
+        return filetype and "download." .. filetype:lower() or "download"
+    end
+
     local headers = self:fetchFeed(item_url, true)
     local filename
 
@@ -763,13 +845,13 @@ function OPDSBrowser:getServerFileName(item_url, filetype)
 
         -- If not found, try from redirect URL (location)
         if not filename and headers["location"] then
-            filename = headers["location"]:gsub(".*/", "")
+            filename = url.unescape(headers["location"]:gsub("[?#].*", ""):gsub(".*/", ""))
         end
     end
 
     -- If still no filename, extract from original URL (remove path and query params)
     if not filename then
-        filename = item_url:gsub(".*/", ""):gsub("?.*", "")
+        filename = url.unescape(item_url:gsub("[?#].*", ""):gsub(".*/", ""))
     end
 
     if filename and filetype then
@@ -786,7 +868,13 @@ end
 -- Generates link to search in catalog
 function OPDSBrowser:getSearchTemplate(osd_url)
     -- parse search descriptor
-    local search_descriptor = self:parseFeed(osd_url)
+    local ok, search_descriptor = pcall(function()
+        return self:parseFeed(osd_url)
+    end)
+    if not ok then
+        logger.info("Cannot get OPDS search descriptor from", redactURLForLog(osd_url), search_descriptor)
+        return nil
+    end
     if search_descriptor and search_descriptor.OpenSearchDescription and search_descriptor.OpenSearchDescription.Url then
         for _, candidate in ipairs(search_descriptor.OpenSearchDescription.Url) do
             if candidate.type and candidate.template and candidate.type:find(self.search_template_type) then
@@ -823,6 +911,7 @@ function OPDSBrowser:genItemTableFromCatalog(catalog, item_url)
     self.facet_groups = {} -- Initialize table to store facet groups
 
     local function build_href(href)
+        if not href then return nil end
         return url.absolute(item_url, href)
     end
 
@@ -840,8 +929,11 @@ function OPDSBrowser:genItemTableFromCatalog(catalog, item_url)
                     -- OpenSearch
                     if link.type:find(self.search_type) then
                         if link.href then
-                            self.search_url = build_href(self:getSearchTemplate(build_href(link.href)))
-                            has_opensearch = true
+                            local search_template = self:getSearchTemplate(build_href(link.href))
+                            if search_template then
+                                self.search_url = build_href(search_template)
+                                has_opensearch = true
+                            end
                         end
                     end
                     -- Calibre search (also matches the actual template for OpenSearch!)
@@ -886,13 +978,13 @@ function OPDSBrowser:genItemTableFromCatalog(catalog, item_url)
                         table.insert(item.acquisitions, {
                             type = "borrow",
                         })
-                    elseif link.rel and link.rel:match(self.acquisition_rel) then
+                    elseif link.href and link.rel and link.rel:match(self.acquisition_rel) then
                         table.insert(item.acquisitions, {
                             type  = link.type,
                             href  = link_href,
                             title = link.title,
                         })
-                    elseif link.rel == self.stream_rel then
+                    elseif link.href and link.rel == self.stream_rel then
                         -- https://vaemendis.net/opds-pse/
                         -- «count» MUST provide the number of pages of the document
                         -- namespace may be not "pse"
@@ -917,7 +1009,7 @@ function OPDSBrowser:genItemTableFromCatalog(catalog, item_url)
                         item.thumbnail = link_href
                     elseif self.image_rel[link.rel] then
                         item.image = link_href
-                    elseif link.rel ~= "alternate" and DocumentRegistry:hasProvider(nil, link.type) then
+                    elseif link.href and link.rel ~= "alternate" and DocumentRegistry:hasProvider(nil, link.type) then
                         table.insert(item.acquisitions, {
                             type  = link.type,
                             href  = link_href,
@@ -927,7 +1019,7 @@ function OPDSBrowser:genItemTableFromCatalog(catalog, item_url)
                     -- This statement grabs the catalog items that are
                     -- indicated by title="pdf" or whose type is
                     -- "application/pdf"
-                    if link.title == "pdf" or link.type == "application/pdf"
+                    if link.href and (link.title == "pdf" or link.type == "application/pdf")
                         and link.rel ~= "subsection" then
                         -- Check for the presence of the pdf suffix and add it
                         -- if it's missing.
@@ -987,65 +1079,34 @@ function OPDSBrowser:genItemTableFromCatalog(catalog, item_url)
         item.author = author
         item.content = entry.content or entry.summary
 
-        local current_server
-        for _, server in ipairs(self.servers) do
-            if server.title == self.root_catalog_title then
-                current_server = server
-                break
+        local current_server = self.root_catalog_server_idx and self.servers[self.root_catalog_server_idx]
+        if current_server and current_server.title ~= self.root_catalog_title then
+            current_server = nil
+        end
+        if not current_server then
+            for _, server in ipairs(self.servers) do
+                if server.title == self.root_catalog_title then
+                    current_server = server
+                    break
+                end
             end
         end
 
         if current_server then
-            -- Handle includes first
-            if current_server.included_authors and #current_server.included_authors > 0 then
-                local author_found = false
-                local lower_author = (author or ""):lower()
-                for _, included_author in ipairs(current_server.included_authors) do
-                    if lower_author:find((included_author or ""):lower(), 1, true) then
-                        author_found = true
-                        break
-                    end
-                end
-                if not author_found then goto continue_entry end
+            -- Include filters are applied first. If set, at least one include filter must match.
+            if listHasEntries(current_server.included_authors)
+                and not listContainsText(current_server.included_authors, author) then
+                goto continue_entry
             end
-
-            if current_server.included_categories and #current_server.included_categories > 0 and entry.category then
-                local category_found = false
-                for _, included_category in ipairs(current_server.included_categories) do
-                    local lower_included_category = (included_category or ""):lower()
-                    for _, category_entry in ipairs(entry.category) do
-                        if category_entry.term and category_entry.term:lower():find(lower_included_category, 1, true) then
-                            category_found = true
-                            break
-                        end
-                    end
-                    if category_found then break end
-                end
-                if not category_found then goto continue_entry end
-            elseif current_server.included_categories and #current_server.included_categories > 0 and (not entry.category or #entry.category == 0) then
-                -- if include categories are set, but the entry has no categories, it should be excluded.
+            if listHasEntries(current_server.included_categories)
+                and not listContainsCategory(current_server.included_categories, entry) then
                 goto continue_entry
             end
 
-            -- Then handle excludes
-            if current_server.excluded_authors and #current_server.excluded_authors > 0 then
-                local lower_author = (author or ""):lower()
-                for _, excluded_author in ipairs(current_server.excluded_authors) do
-                    if lower_author:find((excluded_author or ""):lower(), 1, true) then
-                        goto continue_entry
-                    end
-                end
-            end
-
-            if current_server.excluded_categories and #current_server.excluded_categories > 0 and entry.category then
-                for _, excluded_category in ipairs(current_server.excluded_categories) do
-                    local lower_excluded_category = (excluded_category or ""):lower()
-                    for _, category_entry in ipairs(entry.category) do
-                        if category_entry.term and category_entry.term:lower():find(lower_excluded_category, 1, true) then
-                            goto continue_entry
-                        end
-                    end
-                end
+            -- Exclude filters then remove matching entries from the included set.
+            if listContainsText(current_server.excluded_authors, author)
+                or listContainsCategory(current_server.excluded_categories, entry) then
+                goto continue_entry
             end
         end
 
@@ -1208,13 +1269,13 @@ function OPDSBrowser:showDownloads(item)
 
     local function createTitle(path, file) -- title for ButtonDialog
         return T(_("Download folder:\n%1\n\nDownload filename:\n%2\n\nDownload file type:"),
-            BD.dirpath(path), file or _("<server filename>"))
+            path and BD.dirpath(path) or _("Not set"), file or _("<server filename>"))
     end
 
     local buttons = {} -- buttons for ButtonDialog
     local stream_buttons -- page stream buttons
     local download_buttons = {} -- file type download buttons
-    for i, acquisition in ipairs(acquisitions) do -- filter out unsupported file types
+    for _, acquisition in ipairs(acquisitions) do -- filter out unsupported file types
         if acquisition.count then
             stream_buttons = {
                 {
@@ -1267,16 +1328,23 @@ function OPDSBrowser:showDownloads(item)
                     end,
                     hold_callback = function()
                         UIManager:close(self.download_dialog)
-                        table.insert(self.downloads, {
-                            file     = self:getLocalDownloadPath(nil, filename, filetype, acquisition.href),
-                            url      = acquisition.href,
-                            info     = type(item.content) == "string" and util.htmlToPlainTextIfHtml(item.content) or "",
-                            catalog  = self.root_catalog_title,
-                            username = self.root_catalog_username,
-                            password = self.root_catalog_password,
-                        })
-                        self._manager.updated = true
-                        Notification:notify(_("Book added to download list"), Notification.SOURCE_OTHER)
+                        local local_path = self:getLocalDownloadPath(nil, filename, filetype, acquisition.href)
+                        if local_path then
+                            table.insert(self.downloads, {
+                                file     = local_path,
+                                url      = acquisition.href,
+                                info     = type(item.content) == "string" and util.htmlToPlainTextIfHtml(item.content) or "",
+                                catalog  = self.root_catalog_title,
+                                username = self.root_catalog_username,
+                                password = self.root_catalog_password,
+                            })
+                            self._manager.updated = true
+                            Notification:notify(_("Book added to download list"), Notification.SOURCE_OTHER)
+                        else
+                            UIManager:show(InfoMessage:new{
+                                text = _("Please choose a download folder first."),
+                            })
+                        end
                     end,
                 })
             end
@@ -1385,30 +1453,52 @@ end
 
 -- Helper function to get the filetype from an acquisitions table
 function OPDSBrowser.getFiletype(link)
-    local filetype = util.getFileNameSuffix(link.href)
-    if not DocumentRegistry:hasProvider("dummy." .. filetype) then
-        filetype = nil
+    local href = link.href or ""
+    local parsed = url.parse(href)
+    local path = (parsed and parsed.path or href):gsub("[?#].*", "")
+    local filetype = path ~= "" and util.getFileNameSuffix(path) or nil
+    if filetype then
+        filetype = filetype:lower()
+        if not DocumentRegistry:hasProvider("dummy." .. filetype) then
+            filetype = nil
+        end
     end
     if not filetype and DocumentRegistry:hasProvider(nil, link.type) then
         filetype = DocumentRegistry:mimeToExt(link.type)
+        filetype = filetype and filetype:lower()
     end
     return filetype
+end
+
+function OPDSBrowser:getDefaultDownloadDir()
+    local dir = G_reader_settings:readSetting("download_dir") or G_reader_settings:readSetting("lastdir")
+    return dir ~= "" and dir or nil
 end
 
 -- Returns user selected or last opened folder
 function OPDSBrowser:getCurrentDownloadDir(server)
     if self.sync then
-        if server and server.sync_dir then
+        if server and server.sync_dir and server.sync_dir ~= "" then
             return server.sync_dir
         end
-        return self.settings.sync_dir
+        if self.settings.sync_dir and self.settings.sync_dir ~= "" then
+            return self.settings.sync_dir
+        end
+        return self:getDefaultDownloadDir()
     end
-    return G_reader_settings:readSetting("download_dir") or G_reader_settings:readSetting("lastdir")
+    return self:getDefaultDownloadDir()
 end
 
 function OPDSBrowser:getLocalDownloadPath(server, filename, filetype, remote_url)
     local download_dir = self:getCurrentDownloadDir(server)
+    if not download_dir or download_dir == "" or not filetype or filetype == "" then
+        logger.warn("OPDSBrowser:getLocalDownloadPath: missing download directory or filetype")
+        return nil
+    end
     filename = filename and filename .. "." .. filetype:lower() or self:getServerFileName(remote_url, filetype)
+    if not filename or filename == "" then
+        filename = "download." .. filetype:lower()
+    end
     filename = util.getSafeFilename(filename, download_dir)
     filename = (download_dir ~= "/" and download_dir or "") .. '/' .. filename
     return util.fixUtf8(filename, "_")
@@ -1416,6 +1506,13 @@ end
 
 -- Downloads a book (with "File already exists" dialog)
 function OPDSBrowser:checkDownloadFile(local_path, remote_url, username, password, caller_callback)
+    if not local_path then
+        UIManager:show(InfoMessage:new{
+            text = _("Please choose a download folder first."),
+        })
+        return
+    end
+
     local function download()
         UIManager:scheduleIn(1, function()
             self:downloadFile(local_path, remote_url, username, password, caller_callback)
@@ -1439,50 +1536,93 @@ function OPDSBrowser:checkDownloadFile(local_path, remote_url, username, passwor
 end
 
 function OPDSBrowser:downloadFile(local_path, remote_url, username, password, caller_callback)
+    if not local_path or local_path == "" then
+        UIManager:show(InfoMessage:new{
+            text = _("Please choose a download folder first."),
+        })
+        return false
+    end
+
+    local parsed = url.parse(remote_url or "")
+    local scheme = parsed and parsed.scheme
+    if scheme ~= "http" and scheme ~= "https" then
+        UIManager:show(InfoMessage:new {
+            text = T(_("Invalid protocol:\n%1"), scheme or _("unknown")),
+        })
+        return false
+    end
+
     local temp_path = local_path .. ".download"
-    logger.dbg("Downloading file", local_path, "from", remote_url)
+    local download_dir = util.splitFilePathName(local_path)
+    if download_dir and download_dir ~= "" then
+        util.makePath(download_dir)
+    end
+
+    local file, open_err = io.open(temp_path, "wb")
+    if not file then
+        UIManager:show(InfoMessage:new {
+            text = T(_("Could not save file to:\n%1\n%2"), BD.filepath(local_path), open_err or "open failed"),
+        })
+        return false
+    end
+
+    logger.dbg("Downloading file", local_path, "from", redactURLForLog(remote_url))
     local code, headers, status
-    local parsed = url.parse(remote_url)
-    if parsed.scheme == "http" or parsed.scheme == "https" then
-        socketutil:set_timeout(socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
-        code, headers, status = socket.skip(1, http.request {
+    socketutil:set_timeout(socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
+    local ok, request_code, request_headers, request_status = pcall(function()
+        return socket.skip(1, http.request {
             url      = remote_url,
             headers  = {
                 ["Accept-Encoding"] = "identity",
             },
-            sink     = ltn12.sink.file(io.open(temp_path, "w")),
+            sink     = ltn12.sink.file(file),
             user     = username,
             password = password,
         })
-        socketutil:reset_timeout()
+    end)
+    socketutil:reset_timeout()
+    if ok then
+        code, headers, status = request_code, request_headers, request_status
     else
-        UIManager:show(InfoMessage:new {
-            text = T(_("Invalid protocol:\n%1"), parsed.scheme),
-        })
+        status = request_code
+        logger.warn("OPDSBrowser:downloadFile: request failed", status)
+        pcall(function() file:close() end)
     end
+
     if code == 200 then
-        os.rename(temp_path, local_path)
+        local renamed, rename_err = os.rename(temp_path, local_path)
+        if not renamed then
+            util.removeFile(temp_path)
+            UIManager:show(InfoMessage:new {
+                text = T(_("Could not save file to:\n%1\n%2"), BD.filepath(local_path), rename_err or "rename failed"),
+            })
+            return false
+        end
         logger.dbg("File downloaded to", local_path)
         if caller_callback then
             caller_callback(local_path)
         end
         return true
-    elseif code == 302 and remote_url:match("^https") and headers.location:match("^http[^s]") then
-        util.removeFile(temp_path)
+    end
+
+    util.removeFile(temp_path)
+    local downgrade_location = redirectDowngradeLocation(remote_url, code, headers and headers.location)
+    if downgrade_location then
         UIManager:show(InfoMessage:new{
-            text = T(_("Insecure HTTPS → HTTP downgrade attempted by redirect from:\n\n'%1'\n\nto\n\n'%2'.\n\nPlease inform the server administrator that many clients disallow this because it could be a downgrade attack."), BD.url(remote_url), BD.url(headers.location)),
+            text = T(_("Insecure HTTPS → HTTP downgrade attempted by redirect from:\n\n'%1'\n\nto\n\n'%2'.\n\nPlease inform the server administrator that many clients disallow this because it could be a downgrade attack."),
+                BD.url(remote_url), BD.url(downgrade_location)),
             icon = "notice-warning",
         })
     else
-        util.removeFile(temp_path)
         logger.dbg("OPDSBrowser:downloadFile: Request failed:", status or code)
-        logger.dbg("OPDSBrowser:downloadFile: Response headers:", headers)
+        logger.dbg("OPDSBrowser:downloadFile: Response headers:", headers and socketutil.redact_headers(headers) or nil)
         UIManager:show(InfoMessage:new {
             text = T(_("Could not save file to:\n%1\n%2"),
                 BD.filepath(local_path),
                 status or code or "network unreachable"),
         })
     end
+    return false
 end
 
 -- Menu action on item tap (Download a book / Show subcatalog / Search in catalog)
@@ -1843,7 +1983,7 @@ function OPDSBrowser:downloadDownloadList()
 end
 
 function OPDSBrowser:setMaxSyncDownload()
-    local current_max_dl = self.settings.sync_max_dl or 50
+    local current_max_dl = tonumber(self.settings.sync_max_dl) or 50
     local spin = SpinWidget:new{
         title_text = _("Set maximum sync size"),
         info_text = _("Set the max number of books to download at a time"),
@@ -1923,7 +2063,8 @@ function OPDSBrowser:getFileName(item)
     if self.root_catalog_raw_names then
         filename = nil
     end
-    return util.replaceAllInvalidChars(filename), util.replaceAllInvalidChars(filename_orig)
+    return filename and util.replaceAllInvalidChars(filename) or nil,
+        filename_orig and util.replaceAllInvalidChars(filename_orig) or nil
 end
 
 function OPDSBrowser:updateFieldInCatalog(item, name, value)
@@ -1932,9 +2073,32 @@ function OPDSBrowser:updateFieldInCatalog(item, name, value)
 end
 
 function OPDSBrowser:checkSyncDownload(idx, auto_sync, completion_callback)
-    logger.dbg("OPDS: checkSyncDownload called, sync_dir =", self.settings.sync_dir)
-    if not self.settings.sync_dir then
-        logger.dbg("OPDS: No sync directory configured")
+    logger.dbg("OPDS: checkSyncDownload called, global sync_dir =", self.settings.sync_dir)
+
+    local function get_effective_sync_dir(server)
+        if server and server.sync_dir and server.sync_dir ~= "" then
+            return server.sync_dir
+        end
+        if self.settings.sync_dir and self.settings.sync_dir ~= "" then
+            return self.settings.sync_dir
+        end
+        return self:getDefaultDownloadDir()
+    end
+
+    local has_sync_target = false
+    if idx then
+        has_sync_target = get_effective_sync_dir(self.servers[idx - 1]) and true or false
+    else
+        for _, item in ipairs(self.servers) do
+            if item.sync and get_effective_sync_dir(item) then
+                has_sync_target = true
+                break
+            end
+        end
+    end
+
+    if not has_sync_target then
+        logger.dbg("OPDS: No sync download directory configured")
         if not auto_sync then
             UIManager:show(InfoMessage:new{
                 text = _("Please choose a folder for sync downloads first"),
@@ -1946,6 +2110,7 @@ function OPDSBrowser:checkSyncDownload(idx, auto_sync, completion_callback)
 
     logger.dbg("OPDS: Starting sync process")
     self.sync = true
+    self.sync_server_list = {}
     local info
     if not auto_sync then
         info = InfoMessage:new{
@@ -1954,17 +2119,39 @@ function OPDSBrowser:checkSyncDownload(idx, auto_sync, completion_callback)
         UIManager:show(info)
         UIManager:forceRePaint()
     end
-    if idx then
-        self:fillPendingSyncs(self.servers[idx-1]) -- First item is "Downloads"
-    else
-        for _, item in ipairs(self.servers) do
-            if item.sync then
-                self:fillPendingSyncs(item)
+
+    local fill_ok, fill_err = pcall(function()
+        if idx then
+            local server = self.servers[idx - 1] -- First item is "Downloads"
+            if server then
+                self:fillPendingSyncs(server)
+            end
+        else
+            for _, item in ipairs(self.servers) do
+                if item.sync then
+                    if get_effective_sync_dir(item) then
+                        self:fillPendingSyncs(item)
+                    else
+                        logger.warn("OPDS: Skipping synced catalog without download directory", item.title)
+                    end
+                end
             end
         end
-    end
+    end)
+
     if not auto_sync and info then
         UIManager:close(info)
+    end
+    if not fill_ok then
+        self.sync = false
+        logger.err("OPDS: Failed to build sync list:", fill_err)
+        if not auto_sync then
+            UIManager:show(InfoMessage:new{
+                text = T(_("Could not synchronize OPDS catalog:\n%1"), fill_err),
+            })
+        end
+        if completion_callback then completion_callback() end
+        return
     end
 
     if #self.pending_syncs > 0 then
@@ -1991,6 +2178,7 @@ function OPDSBrowser:checkSyncDownload(idx, auto_sync, completion_callback)
         end
         self.settings.last_sync_time = os.time()
         self._manager.updated = true
+        self._manager:saveSettings()
         self.sync = false
         logger.dbg("OPDS: Sync complete - up to date")
         if completion_callback then completion_callback() end
@@ -1999,18 +2187,30 @@ end
 
 -- Add entries to self.pending_syncs
 function OPDSBrowser:fillPendingSyncs(server)
+    if not server then return end
+
     self.root_catalog_password  = server.password
     self.root_catalog_raw_names = server.raw_names
     self.root_catalog_username  = server.username
     self.root_catalog_title     = server.title
+    self.root_catalog_server_idx = nil
+    for idx, item in ipairs(self.servers) do
+        if item == server then
+            self.root_catalog_server_idx = idx
+            break
+        end
+    end
     self.sync_server            = server
     self.sync_server_list       = self.sync_server_list or {}
-    self.sync_max_dl            = self.settings.sync_max_dl or 50
+    self.sync_max_dl            = tonumber(self.settings.sync_max_dl) or 50
 
-    -- Build a URL→index map for deduplication and path updates
+    -- Build a catalog+URL→index map for deduplication and path updates.
+    local function pending_key(catalog, item_url)
+        return tostring(catalog or "") .. "\0" .. tostring(item_url or "")
+    end
     local pending_urls = {}
     for i, item in ipairs(self.pending_syncs) do
-        pending_urls[item.url] = i
+        pending_urls[pending_key(item.catalog, item.url)] = i
     end
 
     local file_list
@@ -2020,12 +2220,15 @@ function OPDSBrowser:fillPendingSyncs(server)
     if file_str then
         file_list = {}
         for filetype in util.gsplit(file_str, ",") do
-            file_list[util.trim(filetype)] = true
+            local trimmed = util.trim(filetype):lower()
+            if trimmed ~= "" then
+                file_list[trimmed] = true
+            end
         end
     end
     local sync_list = self:getSyncDownloadList()
     if sync_list then
-        for i, entry in ipairs(sync_list) do
+        for _, entry in ipairs(sync_list) do
             -- for project gutenberg
             local sub_table = {}
             local item
@@ -2033,26 +2236,24 @@ function OPDSBrowser:fillPendingSyncs(server)
                 sub_table = self:getSyncDownloadList(entry.url)
             end
             if #sub_table > 0 then
-                -- The first element seems to be most compatible. Second element has most options
-                item = sub_table[2]
+                -- The first element seems to be most compatible. Second element has most options.
+                item = sub_table[2] or sub_table[1]
             else
                 item = entry
             end
-            for j, link in ipairs(item.acquisitions) do
-                -- Only save first link in case of several file types
-                if i == 1 and j == 1 then
-                    new_last_download = link.href
-                end
-                local filetype = self.getFiletype(link)
+            for _, link in ipairs(item.acquisitions or {}) do
+                local filetype = link.href and self.getFiletype(link)
                 if filetype then
                     if not file_str or file_list and file_list[filetype] then
                         local filename = self:getFileName(entry)
                         local download_path = self:getLocalDownloadPath(server, filename, filetype, link.href)
-                        if pending_urls[link.href] then
-                            -- Update file path in case sync_dir or filename settings changed
-                            self.pending_syncs[pending_urls[link.href]].file = download_path
-                        else
-                            if dl_count <= self.sync_max_dl then
+                        if download_path then
+                            new_last_download = new_last_download or link.href
+                            local key = pending_key(server.url, link.href)
+                            if pending_urls[key] then
+                                -- Update file path in case sync_dir or filename settings changed.
+                                self.pending_syncs[pending_urls[key]].file = download_path
+                            elseif dl_count <= self.sync_max_dl then
                                 table.insert(self.pending_syncs, {
                                     file = download_path,
                                     url = link.href,
@@ -2060,7 +2261,7 @@ function OPDSBrowser:fillPendingSyncs(server)
                                     password = self.root_catalog_password,
                                     catalog = server.url,
                                 })
-                                pending_urls[link.href] = #self.pending_syncs
+                                pending_urls[key] = #self.pending_syncs
                                 dl_count = dl_count + 1
                             end
                         end
@@ -2093,8 +2294,8 @@ function OPDSBrowser:getSyncDownloadList(url_arg)
         local count = 1
         local acquisitions_empty = false
         -- For project gutenberg
-        while #sub_table[count].acquisitions == 0 do
-            if util.stringEndsWith(sub_table[count].url, ".opds") then
+        while #(sub_table[count].acquisitions or {}) == 0 do
+            if sub_table[count].url and util.stringEndsWith(sub_table[count].url, ".opds") then
                 acquisitions_empty = true
                 break
             end
@@ -2109,7 +2310,7 @@ function OPDSBrowser:getSyncDownloadList(url_arg)
         if acquisitions_empty then
             first_href = sub_table[count].url
         else
-            first_href = sub_table[1].acquisitions[1].href
+            first_href = sub_table[count].acquisitions[1].href
         end
         if first_href == self.sync_server.last_download and not self.sync_force then
             return nil
@@ -2123,7 +2324,8 @@ function OPDSBrowser:getSyncDownloadList(url_arg)
                     href = nil
                 end
             else
-                href = entry.acquisitions[1].href
+                local acquisition = entry.acquisitions and entry.acquisitions[1]
+                href = acquisition and acquisition.href
             end
             if href then
                 if href == self.sync_server.last_download and not self.sync_force then

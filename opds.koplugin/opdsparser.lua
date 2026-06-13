@@ -30,7 +30,11 @@ local function unescape(str)
             else
                 codepoint = tonumber(s)
             end
-            return util.unicodeCodepointToUtf8(codepoint)
+            if codepoint then
+                local ok, char = pcall(util.unicodeCodepointToUtf8, codepoint)
+                return ok and char or orig
+            end
+            return orig
         else
             return orig
         end
@@ -54,7 +58,7 @@ function OPDSParser:createFlatXTable(xlex, curr_element)
                 -- if it does, if it's a table, add to it
                 -- if it doesn't, then add a table
                 local tab = self:createFlatXTable(xlex)
-                if txt == "entry" or txt == "link" or txt == "Url" then
+                if txt == "entry" or txt == "link" or txt == "Url" or txt == "category" then
                     if curr_element[txt] == nil then
                         curr_element[txt] = {}
                     end

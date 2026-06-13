@@ -189,7 +189,11 @@ end
 
 function OPDS:schedulePeriodicSync()
     UIManager:unschedule(self.periodic_sync_task)
-    local interval_seconds = self.settings.sync_interval_hours * 3600
+    local interval_hours = tonumber(self.settings.sync_interval_hours) or self.default_settings.sync_interval_hours
+    if interval_hours <= 0 then
+        interval_hours = self.default_settings.sync_interval_hours
+    end
+    local interval_seconds = interval_hours * 3600
     UIManager:scheduleIn(interval_seconds, self.periodic_sync_task)
     logger.dbg("OPDS: Scheduled periodic sync in", interval_seconds, "seconds")
 end
@@ -199,14 +203,25 @@ function OPDS:performAutoSync()
         logger.dbg("OPDS: Sync already in progress, skipping")
         return
     end
-    if not self.settings.sync_dir then
-        logger.dbg("OPDS: No sync directory configured, skipping auto-sync")
+    local has_synced_catalog = false
+    for _, server in ipairs(self.servers) do
+        if server.sync then
+            has_synced_catalog = true
+            break
+        end
+    end
+    if not has_synced_catalog then
+        logger.dbg("OPDS: No catalogs enabled for auto-sync, skipping")
         return
     end
 
     local now = os.time()
-    local time_since_last = now - (self.settings.last_sync_time or 0)
-    local min_interval = self.settings.sync_interval_hours * 3600
+    local time_since_last = now - (tonumber(self.settings.last_sync_time) or 0)
+    local interval_hours = tonumber(self.settings.sync_interval_hours) or self.default_settings.sync_interval_hours
+    if interval_hours <= 0 then
+        interval_hours = self.default_settings.sync_interval_hours
+    end
+    local min_interval = interval_hours * 3600
     if time_since_last < min_interval then
         logger.dbg("OPDS: Last sync too recent, skipping")
         return
@@ -221,22 +236,29 @@ function OPDS:performAutoSync()
     self.sync_in_progress = true
     logger.dbg("OPDS: Starting auto-sync")
 
-    local auto_browser = OPDSBrowser:new{
-        servers = self.servers,
-        downloads = self.downloads,
-        settings = self.settings,
-        pending_syncs = self.pending_syncs,
-        title = _("OPDS catalog"),
-        is_popout = false,
-        is_borderless = true,
-        title_bar_fm_style = true,
-        _manager = self,
-    }
-    auto_browser.sync_force = false
-    auto_browser:checkSyncDownload(nil, true, function()
+    local function finish_auto_sync()
         self.sync_in_progress = false
         logger.dbg("OPDS: Auto-sync completed")
+    end
+    local ok, err = pcall(function()
+        local auto_browser = OPDSBrowser:new{
+            servers = self.servers,
+            downloads = self.downloads,
+            settings = self.settings,
+            pending_syncs = self.pending_syncs,
+            title = _("OPDS catalog"),
+            is_popout = false,
+            is_borderless = true,
+            title_bar_fm_style = true,
+            _manager = self,
+        }
+        auto_browser.sync_force = false
+        auto_browser:checkSyncDownload(nil, true, finish_auto_sync)
     end)
+    if not ok then
+        self.sync_in_progress = false
+        logger.err("OPDS: Auto-sync failed:", err)
+    end
 end
 
 function OPDS:saveSettings()

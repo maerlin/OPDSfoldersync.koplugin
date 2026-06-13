@@ -14,93 +14,139 @@ local T = require("ffi/util").template
 
 local OPDSPSE = {}
 
+local function redactURLForLog(value)
+    if type(value) ~= "string" then return value end
+    return value
+        :gsub("(/opds/)[^/]+(/image)", "%1…%2")
+        :gsub("([?&][^=]*[Kk]ey=)[^&]+", "%1…")
+        :gsub("([?&][Tt]oken=)[^&]+", "%1…")
+end
+
 -- This function attempts to pull chapter progress from Kavita.
 function OPDSPSE.getLastPage(remote_url, username, password)
-    local last_page = 0
+    if type(remote_url) ~= "string" then return 0 end
 
-    -- create URL's and reference vars
-    local chapter = string.match(remote_url, "chapterId=(%w+)")
-    local api_key = string.match(remote_url, "opds/(.+)/image")
-    local progress_url = string.match(remote_url, "(.+)/api").."/api/Reader/get-progress?chapterId="..chapter
-    local auth_url = string.match(remote_url, "(.+)/api").."/api/Plugin/authenticate?apiKey="..api_key.."&pluginName=KOReader-OPDS"
+    -- Create Kavita API URLs from page-stream URLs. Non-Kavita streams simply have no progress.
+    local chapter = remote_url:match("[?&]chapterId=([^&]+)")
+    local api_key = remote_url:match("/opds/([^/]+)/image")
+    local api_base = remote_url:match("(.+)/api")
+    if not chapter or not api_key or not api_base then
+        return 0
+    end
 
-    -- Do an HTTP POST to get the Bearer Token for authentication of the /api/Reader/get-progress endpoint
+    chapter = url.unescape(chapter)
+    api_key = url.unescape(api_key)
+    local progress_url = api_base .. "/api/Reader/get-progress?chapterId=" .. url.escape(chapter)
+    local auth_url = api_base .. "/api/Plugin/authenticate?apiKey=" .. url.escape(api_key)
+        .. "&pluginName=KOReader-OPDS"
+
+    -- Do an HTTP POST to get the Bearer Token for authentication of the /api/Reader/get-progress endpoint.
     local auth_parsed = url.parse(auth_url)
     local auth_data = {}
     local auth_code, auth_headers, auth_status
-    if auth_parsed.scheme == "http" or auth_parsed.scheme == "https" then
+    if auth_parsed and (auth_parsed.scheme == "http" or auth_parsed.scheme == "https") then
         socketutil:set_timeout(socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
-        auth_code, auth_headers, auth_status = socket.skip(1, http.request {
-            method = "POST",
-            url         = auth_url,
-            headers     = {
-                ["Accept-Encoding"] = "identity",
-                ["Authentication"] = api_key,
-            },
-            sink        = ltn12.sink.table(auth_data),
-            user        = username,
-            password    = password,
-        })
+        local ok, request_code, request_headers, request_status = pcall(function()
+            return socket.skip(1, http.request {
+                method = "POST",
+                url         = auth_url,
+                headers     = {
+                    ["Accept-Encoding"] = "identity",
+                    ["Authentication"] = api_key,
+                },
+                sink        = ltn12.sink.table(auth_data),
+                user        = username,
+                password    = password,
+            })
+        end)
         socketutil:reset_timeout()
+        if ok then
+            auth_code, auth_headers, auth_status = request_code, request_headers, request_status
+        else
+            auth_status = request_code
+        end
     else
         UIManager:show(InfoMessage:new {
-            text = T(_("Invalid protocol:\n%1"), auth_parsed.scheme),
+            text = T(_("Invalid protocol:\n%1"), auth_parsed and auth_parsed.scheme or _("unknown")),
         })
     end
 
     if auth_code == 200 then
-        -- if http request for bearer token was successful, pull bearer token from response and
-        -- attempt to pull progress for chapterId in remote_url
-        local bearer_token = auth_data[1]:match("\"token\":\"(.+)\",\"refresh")
+        -- If auth succeeded, pull bearer token and then request chapter progress.
+        local bearer_token = table.concat(auth_data):match('"token"%s*:%s*"([^"]+)"')
+        if not bearer_token then
+            logger.dbg("OPDSPSE:getLastPage: Authentication response did not contain a token")
+            return 0
+        end
 
-        -- Do HTTP GET request for chapter progress
+        -- Do HTTP GET request for chapter progress.
         local progress_parsed = url.parse(progress_url)
         local progress_data = {}
         local progress_code, progress_headers, progress_status
-        if progress_parsed.scheme == "http" or progress_parsed.scheme == "https" then
+        if progress_parsed and (progress_parsed.scheme == "http" or progress_parsed.scheme == "https") then
             socketutil:set_timeout(socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
-            progress_code, progress_headers, progress_status = socket.skip(1, http.request {
-                url         = progress_url,
-                headers     = {
-                    ["Accept-Encoding"] = "identity",
-                    ["Authorization"] = "Bearer "..bearer_token,
-                },
-                sink        = ltn12.sink.table(progress_data),
-                user        = username,
-                password    = password,
-            })
+            local ok, request_code, request_headers, request_status = pcall(function()
+                return socket.skip(1, http.request {
+                    url         = progress_url,
+                    headers     = {
+                        ["Accept-Encoding"] = "identity",
+                        ["Authorization"] = "Bearer "..bearer_token,
+                    },
+                    sink        = ltn12.sink.table(progress_data),
+                    user        = username,
+                    password    = password,
+                })
+            end)
             socketutil:reset_timeout()
+            if ok then
+                progress_code, progress_headers, progress_status = request_code, request_headers, request_status
+            else
+                progress_status = request_code
+            end
         else
             UIManager:show(InfoMessage:new {
-                text = T(_("Invalid protocol:\n%1"), progress_parsed.scheme),
+                text = T(_("Invalid protocol:\n%1"), progress_parsed and progress_parsed.scheme or _("unknown")),
             })
         end
 
         if progress_code == 200 then
-            -- if HTTP GET was successful, pull page number from response
-            last_page = progress_data[1]:match("\"pageNum\":(.+),\"seriesId")
+            -- If HTTP GET was successful, pull page number from response.
+            return tonumber(table.concat(progress_data):match('"pageNum"%s*:%s*(%d+)')) or 0
         else
             logger.dbg("OPDSPSE:getLastPage: Progress Request failed:", progress_status or progress_code)
-            logger.dbg("OPDSPSE:getLastPage: Progress Response headers:", progress_headers)
+            logger.dbg("OPDSPSE:getLastPage: Progress Response headers:",
+                progress_headers and socketutil.redact_headers(progress_headers) or nil)
         end
     else
         logger.dbg("OPDSPSE:getLastPage: Authentication Request failed:", auth_status or auth_code)
-        logger.dbg("OPDSPSE:getLastPage: Authentication Response headers:", auth_headers)
+        logger.dbg("OPDSPSE:getLastPage: Authentication Response headers:",
+            auth_headers and socketutil.redact_headers(auth_headers) or nil)
     end
 
-    -- returns page number. If the HTTP Requests were unsuccessful, defaults to 0.
-    return last_page;
+    -- Return page number. If the HTTP requests were unsuccessful, default to 0.
+    return 0
 end
 
 function OPDSPSE:streamPages(remote_url, count, continue, username, password, last_page_read)
-    -- attempt to pull chapter progress from Kavita if user pressed
-    -- "Page Stream" button.
+    if type(remote_url) ~= "string" then
+        UIManager:show(InfoMessage:new {
+            text = _("Invalid stream URL."),
+        })
+        return
+    end
+    count = math.max(1, tonumber(count) or 1)
+
+    -- Attempt to pull chapter progress from Kavita when supported.
     -- We have to pull the progress here, otherwise the creation of the page_table
     -- will overwrite the book progress before we pull it, making it always 0.
-    local ok, last_page = pcall(function() return self:getLastPage(remote_url, username, password) end)
-    if not ok then
-        logger.warn("Couldn't pull progress, defaulting to Page 0.")
-        last_page = 0
+    local last_page = 0
+    if type(remote_url) == "string" and remote_url:find("chapterId=", 1, true) then
+        local ok, result = pcall(function() return self:getLastPage(remote_url, username, password) end)
+        if ok then
+            last_page = tonumber(result) or 0
+        else
+            logger.warn("Couldn't pull progress, defaulting to Page 0.")
+        end
     end
     local page_table = {image_disposable = true}
     setmetatable(page_table, {__index = function (_, key)
@@ -113,25 +159,32 @@ function OPDSPSE:streamPages(remote_url, count, continue, username, password, la
             page_url = page_url:gsub("{maxWidth}", tostring(Screen:getWidth()))
             local page_data = {}
 
-            logger.dbg("Streaming page from", page_url)
+            logger.dbg("Streaming page from", redactURLForLog(page_url))
             local parsed = url.parse(page_url)
 
             local code, headers, status
-            if parsed.scheme == "http" or parsed.scheme == "https" then
+            if parsed and (parsed.scheme == "http" or parsed.scheme == "https") then
                 socketutil:set_timeout(socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
-                code, headers, status = socket.skip(1, http.request {
-                    url         = page_url,
-                    headers     = {
-                        ["Accept-Encoding"] = "identity",
-                    },
-                    sink        = ltn12.sink.table(page_data),
-                    user        = username,
-                    password    = password,
-                })
+                local ok, request_code, request_headers, request_status = pcall(function()
+                    return socket.skip(1, http.request {
+                        url         = page_url,
+                        headers     = {
+                            ["Accept-Encoding"] = "identity",
+                        },
+                        sink        = ltn12.sink.table(page_data),
+                        user        = username,
+                        password    = password,
+                    })
+                end)
                 socketutil:reset_timeout()
+                if ok then
+                    code, headers, status = request_code, request_headers, request_status
+                else
+                    status = request_code
+                end
             else
                 UIManager:show(InfoMessage:new {
-                    text = T(_("Invalid protocol:\n%1"), parsed.scheme),
+                    text = T(_("Invalid protocol:\n%1"), parsed and parsed.scheme or _("unknown")),
                 })
             end
 
@@ -142,7 +195,8 @@ function OPDSPSE:streamPages(remote_url, count, continue, username, password, la
                 return page_bb
             else
                 logger.dbg("OPDSBrowser:streamPages: Request failed:", status or code)
-                logger.dbg("OPDSBrowser:streamPages: Response headers:", headers)
+                logger.dbg("OPDSBrowser:streamPages: Response headers:",
+                    headers and socketutil.redact_headers(headers) or nil)
                 local error_bb = RenderImage:renderImageFile("resources/koreader.png", false)
                 return error_bb
             end
@@ -160,11 +214,10 @@ function OPDSPSE:streamPages(remote_url, count, continue, username, password, la
     if continue then
         self:jumpToPage(viewer, count)
     elseif last_page_read then
-        viewer:switchToImageNum(last_page_read)
+        viewer:switchToImageNum(math.min(math.max(1, tonumber(last_page_read) or 1), count))
     else
-        -- add 1 since Kavita's Page count is zero based
-        -- and ImageViewer is not.
-        viewer:switchToImageNum(last_page+1)
+        -- Add 1 since Kavita's page count is zero-based and ImageViewer is not.
+        viewer:switchToImageNum(math.min(math.max(1, last_page + 1), count))
     end
 end
 
