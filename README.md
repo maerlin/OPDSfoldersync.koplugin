@@ -94,13 +94,14 @@ The plugin keeps OPDS-PSE/page-stream support from the upstream plugin:
 > [!IMPORTANT]
 > This plugin replaces KOReader's built-in OPDS plugin. Do not keep two `opds.koplugin` folders installed at the same time.
 
-1. Find your KOReader installation directory.
-2. Open KOReader's `plugins` directory.
+1. Download or clone this repository.
+2. Find your KOReader installation directory and open its `plugins` directory.
 3. Remove or back up the existing `opds.koplugin` directory.
-4. Copy this repository's `opds.koplugin` directory into KOReader's `plugins` directory.
+4. Copy this repository's contents into a folder named `opds.koplugin` inside KOReader's `plugins` directory.
+   - If you cloned it, rename the clone folder to `opds.koplugin`.
 5. Restart KOReader.
 
-Expected layout:
+Expected installed layout:
 
 ```text
 koreader/
